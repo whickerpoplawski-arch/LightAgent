@@ -24,6 +24,33 @@ from uuid import uuid4
 import httpx
 from openai.types.chat import ChatCompletionChunk
 
+# Ephemeral profile/memory/identity packs use these wrappers. Session
+# transcripts drop them so a pack cannot be replayed as chat content.
+# See local/memory/README.md and local/conversations/README.md.
+_EPHEMERAL_MEMORY_RE = re.compile(r"<memory-context>.*?</memory-context>\s*", re.DOTALL)
+_EPHEMERAL_PERSONA_RE = re.compile(r"<persona>.*?</persona>\s*", re.DOTALL)
+_EPHEMERAL_IDENTITY_RE = re.compile(r"<identity\b[^>]*>.*?</identity>\s*", re.DOTALL)
+
+
+def _strip_ephemeral_memory(messages: list) -> list:
+    """Return a transcript copy with memory/persona/identity packs removed."""
+    cleaned = []
+    for message in messages or []:
+        if not isinstance(message, dict):
+            cleaned.append(message)
+            continue
+        item = dict(message)
+        content = item.get("content")
+        if isinstance(content, str) and (
+            "<memory-context>" in content or "<persona>" in content or "<identity" in content
+        ):
+            content = _EPHEMERAL_MEMORY_RE.sub("", content)
+            content = _EPHEMERAL_PERSONA_RE.sub("", content)
+            content = _EPHEMERAL_IDENTITY_RE.sub("", content)
+            item["content"] = content.strip()
+        cleaned.append(item)
+    return cleaned
+
 # 从各子模块导入
 from .version import __version__
 from .protocol import (
@@ -216,6 +243,9 @@ class LightAgent:
         self.model = model
         self.memory = memory
         self.memory_policy = memory_policy or MemoryPolicy(namespace=memory_namespace)
+        # Set by _add_memory_context / local.memory.inject. Never copied into the user message.
+        self._ephemeral_memory_pack = None
+        self.ephemeral_context_provider = None
         self.guardrails = GuardrailManager(
             input_guardrails=input_guardrails,
             tool_guardrails=tool_guardrails,
@@ -665,8 +695,18 @@ class LightAgent:
             if skills_xml:
                 system_prompt += f"\n\n## 可用技能\n{skills_xml}\n"
                 system_prompt += "当用户需求与某个技能描述匹配时，请先使用 activate_skill 工具加载完整指令。"
-        # 添加记忆上下文
+        # 记忆只进入当次 system/instruction。不要把 pack 拼进用户提问。
+        # 可回滚：改回把 context 前缀拼到 query 上（那是 P0 之前的行为）。
         query = self._add_memory_context(query, user_id)
+        ephemeral_blocks = []
+        kernel_pack = getattr(self, "_ephemeral_memory_pack", None)
+        if kernel_pack:
+            ephemeral_blocks.append(kernel_pack)
+        profile_pack = self._profile_ephemeral_pack(query, user_id, history)
+        if profile_pack:
+            ephemeral_blocks.append(profile_pack)
+        if ephemeral_blocks:
+            system_prompt += "\n\n" + "\n\n".join(ephemeral_blocks)
 
         # 思维链处理
         active_tools = []
@@ -726,7 +766,7 @@ class LightAgent:
                 return stream_result
             return self._format_run_result(hook_error, result_format, traceid, hook_error)
         try:
-            response = self.client.chat.completions.create(**self.chat_params)
+            response = self._dispatch_chat_completion(self.chat_params)
         except Exception as e:
             self._complete_model_request(error=e)
             error_msg = format_lightagent_error(e, "create chat completion")
@@ -814,11 +854,42 @@ class LightAgent:
             *,
             max_messages: int = 20,
             session_id: str | None = None,
+            focus: str | None = None,
+            life: bool = False,
+            space_id: str | None = None,
     ) -> Dict[str, Any]:
         session = self.get_session(session_id)
         if session is None:
             raise KeyError(session_id or "current session")
-        result = self.context_compactor.compact(ContextProjector().messages(session), max_messages=max_messages)
+        projected = ContextProjector().messages(session)
+        if life or focus is not None:
+            try:
+                from local.compact.kernel_hook import compact_session_life
+
+                payload = compact_session_life(
+                    projected,
+                    focus=focus,
+                    space_id=space_id,
+                    agent=self,
+                )
+            except Exception as exc:
+                self.log("ERROR", "compact_session_life_failed", {"error": f"{type(exc).__name__}: {exc}"})
+                payload = None
+            if payload is not None:
+                target = self.runtime.session if self.runtime.session and self.runtime.session.session_id == session.session_id else session
+                target.append("context.compacted", {
+                    "messages": payload.get("messages"),
+                    "removed_count": payload.get("removed_count"),
+                    "summary": payload.get("summary"),
+                    "spilled": payload.get("spilled"),
+                    "trigger": "manual",
+                    "fallback": payload.get("fallback"),
+                    "notice": payload.get("notice"),
+                })
+                self.runtime.session_store.save(target)
+                return payload
+        stripped = _strip_ephemeral_memory(projected)
+        result = self.context_compactor.compact(stripped, max_messages=max_messages)
         target = self.runtime.session if self.runtime.session and self.runtime.session.session_id == session.session_id else session
         target.append("context.compacted", {
             "messages": result.messages,
@@ -933,7 +1004,9 @@ class LightAgent:
             "run_group_id": getattr(self, "_run_group_id", None),
         }
         if event_type == "model_request":
-            session_data["messages"] = deepcopy(getattr(self, "chat_params", {}).get("messages", []))
+            # Keep the pack on the live request only. The session copy is the transcript.
+            raw_messages = deepcopy(getattr(self, "chat_params", {}).get("messages", []))
+            session_data["messages"] = _strip_ephemeral_memory(raw_messages)
         self._record_session_event(session_type, session_data)
         recorder = getattr(self, "_trace_recorder", None)
         if recorder:
@@ -1106,16 +1179,56 @@ class LightAgent:
 
     def _compact_model_context(self) -> None:
         messages = self.chat_params.get("messages", [])
-        if not self.context_budget or self.context_budget.fits(messages):
+        if not isinstance(messages, list) or not messages or self.context_budget is None:
             return
-        compacted = self.context_compactor.compact_to_budget(messages, self.context_budget)
-        self.chat_params["messages"] = compacted.messages
-        self._record_session_event("context.compacted", {
-            "removed_count": compacted.removed_count,
-            "summary": compacted.summary,
-            "spilled": compacted.spilled,
-            "estimated_tokens": self.context_budget.estimate(compacted.messages),
-        })
+        budget = self.context_budget
+        stripped = _strip_ephemeral_memory(deepcopy(messages))
+        try:
+            over_ratio = budget.usage_ratio(stripped) > 0.85
+        except Exception:
+            over_ratio = False
+        if not over_ratio and budget.fits(stripped):
+            return
+        blocks: list[str] = []
+        try:
+            from local.compact.ephemeral import ephemeral_blocks, reinject_blocks
+
+            blocks = ephemeral_blocks(messages)
+        except Exception:
+            ephemeral_blocks = None
+            reinject_blocks = None
+        compacted_messages = None
+        event: Dict[str, Any] = {
+            "removed_count": 0,
+            "summary": None,
+            "spilled": [],
+            "trigger": "auto" if over_ratio else "budget",
+            "fallback": False,
+        }
+        if over_ratio:
+            try:
+                from local.compact.kernel_hook import compact_model_messages
+
+                compacted_messages, event = compact_model_messages(
+                    stripped,
+                    budget=budget,
+                    agent=self,
+                )
+            except Exception as exc:
+                self.log("ERROR", "auto_compact_failed", {"error": f"{type(exc).__name__}: {exc}"})
+                event["fallback"] = True
+                event["error"] = f"{type(exc).__name__}: {exc}"
+        if compacted_messages is None:
+            compacted = self.context_compactor.compact_to_budget(stripped, budget)
+            compacted_messages = compacted.messages
+            event["removed_count"] = compacted.removed_count
+            event["summary"] = compacted.summary
+            event["spilled"] = compacted.spilled
+        if blocks and reinject_blocks is not None:
+            compacted_messages = reinject_blocks(compacted_messages, blocks)
+        event["estimated_tokens"] = budget.estimate(compacted_messages)
+        self.chat_params["messages"] = compacted_messages
+        self._record_session_event("context.compacted", event)
 
     def _complete_model_request(
             self,
@@ -1436,8 +1549,48 @@ class LightAgent:
             else:
                 yield StreamEvent(type="content", data=chunk, trace_id=trace_id)
 
+    def _dispatch_chat_completion(self, params: Dict[str, Any]):
+        """Send one completion.
+
+        P0 already attaches ephemeral memory/profile packs to ``system_prompt``
+        before ``chat_params`` is built. Identity/persona for the TUI go through
+        ``local.memory.inject``. This wrapper exists so call sites can stay
+        uniform if a later path moves injection to send-time.
+        """
+        return self.client.chat.completions.create(**params)
+
+    def _profile_ephemeral_pack(self, query: str, user_id: str, history: list) -> str:
+        """Ask the local profile provider for this turn's pack.
+
+        A provider failure becomes an unavailable notice. It must not be written
+        into the user message, and it must not stop the turn.
+        """
+        provider = getattr(self, "ephemeral_context_provider", None)
+        if not callable(provider):
+            return ""
+        try:
+            text = provider(query=query, user_id=str(user_id), history=list(history or []))
+        except Exception as exc:
+            self.log("ERROR", "profile_pack_unavailable", {"error": f"{type(exc).__name__}: {exc}"})
+            return (
+                "<memory-context>\n"
+                "memory unavailable: 用户画像这一轮没有取到。"
+                "不要对用户说「我什么都不记得」；说明记忆暂时不可用即可。\n"
+                "</memory-context>"
+            )
+        return str(text or "")
+
     def _add_memory_context(self, query: str, user_id: str) -> str:
-        """添加记忆上下文"""
+        """检索记忆并挂到当次 ephemeral pack，不改写用户提问。
+
+        P0：检索结果放进 ``_ephemeral_memory_pack``，由调用方追加到 system。
+        返回值始终是原始 ``query``。``store`` 只持久化这句原文，不会把
+        「用户偏好 + 用户提问」整段当成用户内容。``self_learning`` 仍是
+        agent 反思候选，不是用户画像。
+
+        可回滚：恢复 ``return f"{context}\\n##用户提问：\\n{query}"``。
+        """
+        self._ephemeral_memory_pack = None
         if self.memory is None:
             return query
 
@@ -1483,7 +1636,9 @@ class LightAgent:
                 scope="agent",
             )
 
-        return f"{context}\n##用户提问：\n{query}" if context else query
+        if context.strip():
+            self._ephemeral_memory_pack = "<memory-context>\n" + context.strip() + "\n</memory-context>"
+        return query
 
     def _retrieve_memory_with_hooks(
             self,
@@ -2083,7 +2238,7 @@ class LightAgent:
                 return hook_error
 
             try:
-                response = self.client.chat.completions.create(**self.chat_params)
+                response = self._dispatch_chat_completion(self.chat_params)
             except Exception as e:
                 self._complete_model_request(error=e)
                 error_msg = format_lightagent_error(e, "continue chat completion")
@@ -2433,7 +2588,7 @@ class LightAgent:
                                 yield hook_error
                                 return
                             try:
-                                response = self.client.chat.completions.create(**self.chat_params)
+                                response = self._dispatch_chat_completion(self.chat_params)
                             except Exception as e:
                                 self._complete_model_request(error=e)
                                 error_msg = format_lightagent_error(e, "continue streaming chat completion")

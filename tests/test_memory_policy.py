@@ -26,6 +26,15 @@ class StaticCompletions:
         return SimpleNamespace(choices=[SimpleNamespace(message=message)])
 
 
+def _memory_lanes(completions, index=0):
+    """Memory is injected on the system lane, not the user message."""
+    messages = completions.calls[index]["messages"]
+    system = "\n".join(str(item.get("content") or "") for item in messages if item.get("role") == "system")
+    user = "\n".join(str(item.get("content") or "") for item in messages if item.get("role") == "user")
+    assert "<memory-context>" not in user
+    return system, user
+
+
 class RecordingMemory:
     def __init__(self, results):
         self.results = results
@@ -100,10 +109,11 @@ def test_memory_policy_namespaces_user_id_and_filters_cross_user_results():
     assert result == "done"
     assert memory.retrieve_calls[0]["user_id"] == "tenant-a:alice"
     assert memory.store_calls[0]["user_id"] == "tenant-a:alice"
-    user_message = completions.calls[0]["messages"][-1]["content"]
-    assert "safe memory" in user_message
-    assert "other user memory" not in user_message
-    assert "unattributed memory" not in user_message
+    system, user = _memory_lanes(completions)
+    assert "safe memory" in system
+    assert "safe memory" not in user
+    assert "other user memory" not in system
+    assert "unattributed memory" not in system
 
 
 def test_memory_namespace_shortcut_keeps_default_unattributed_results():
@@ -113,7 +123,9 @@ def test_memory_namespace_shortcut_keeps_default_unattributed_results():
     agent.run("hello", user_id="alice")
 
     assert memory.retrieve_calls[0]["user_id"] == "tenant-b:alice"
-    assert "legacy memory" in completions.calls[0]["messages"][-1]["content"]
+    system, user = _memory_lanes(completions)
+    assert "legacy memory" in system
+    assert "legacy memory" not in user
 
 
 def test_memory_policy_filters_by_source_scope_agent_trust_and_confidence():
@@ -176,11 +188,12 @@ def test_memory_policy_filters_by_source_scope_agent_trust_and_confidence():
 
     agent.run("hello", user_id="alice")
 
-    user_message = completions.calls[0]["messages"][-1]["content"]
-    assert "current user preference" in user_message
-    assert "self reflection should stay private" not in user_message
-    assert "wrong agent memory" not in user_message
-    assert "low confidence memory" not in user_message
+    system, user = _memory_lanes(completions)
+    assert "current user preference" in system
+    assert "current user preference" not in user
+    assert "self reflection should stay private" not in system
+    assert "wrong agent memory" not in system
+    assert "low confidence memory" not in system
 
 
 def test_memory_policy_filters_expired_memory_results():
@@ -196,10 +209,11 @@ def test_memory_policy_filters_expired_memory_results():
 
     agent.run("hello", user_id="alice")
 
-    user_message = completions.calls[0]["messages"][-1]["content"]
-    assert "fresh memory" in user_message
-    assert "expired memory" not in user_message
-    assert "missing expiry" not in user_message
+    system, user = _memory_lanes(completions)
+    assert "fresh memory" in system
+    assert "fresh memory" not in user
+    assert "expired memory" not in system
+    assert "missing expiry" not in system
 
 
 def test_memory_policy_rejects_missing_scope_metadata_when_filters_are_enabled():
@@ -215,7 +229,9 @@ def test_memory_policy_rejects_missing_scope_metadata_when_filters_are_enabled()
 
     agent.run("hello", user_id="alice")
 
-    assert "legacy unattributed memory" not in completions.calls[0]["messages"][-1]["content"]
+    system, user = _memory_lanes(completions)
+    assert "legacy unattributed memory" not in system
+    assert "legacy unattributed memory" not in user
 
 
 def test_memory_scope_exports_recommended_metadata_shape():
@@ -694,9 +710,10 @@ def test_memory_retrieve_hooks_can_rewrite_and_filter_results():
 
     assert result.content == "done"
     assert memory.retrieve_calls[0] == {"query": "rewritten query", "user_id": "tenant-a:alice"}
-    user_message = completions.calls[0]["messages"][-1]["content"]
-    assert "allowed memory" in user_message
-    assert "blocked memory" not in user_message
+    system, user = _memory_lanes(completions)
+    assert "allowed memory" in system
+    assert "allowed memory" not in user
+    assert "blocked memory" not in system
     memory_phases = [phase for phase, _ in calls if phase in ("before_memory_retrieve", "after_memory_retrieve")]
     assert memory_phases == ["before_memory_retrieve", "after_memory_retrieve"]
     assert any(event["type"] == "hook_decision" for event in result.trace)
@@ -724,7 +741,9 @@ def test_before_memory_retrieve_hook_can_block_prompt_injection():
 
     assert result.content == "done"
     assert memory.retrieve_calls == []
-    assert "should not appear" not in completions.calls[0]["messages"][-1]["content"]
+    system, user = _memory_lanes(completions)
+    assert "should not appear" not in system
+    assert "should not appear" not in user
     assert any(event["type"] == "memory_retrieve_block" for event in result.trace)
 
 

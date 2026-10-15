@@ -1,0 +1,562 @@
+# P0 diffs against upstream LightAgent and the pre-P0 local/ overlay.
+# Apply from the repo root with: patch -p1 < artifacts/p0_diff.patch
+# New local/memory and local/persona files are in p0_memory_bundle.tgz, not this patch.
+--- a/LightAgent/core.py
++++ b/LightAgent/core.py
+@@ -24,6 +24,25 @@
+ import httpx
+ from openai.types.chat import ChatCompletionChunk
+ 
++# Ephemeral profile/memory packs use this wrapper. Session transcripts drop it
++# so a pack cannot be replayed as chat content. See local/memory/README.md.
++_EPHEMERAL_MEMORY_RE = re.compile(r"<memory-context>.*?</memory-context>\s*", re.DOTALL)
++
++
++def _strip_ephemeral_memory(messages: list) -> list:
++    """Return a transcript copy with memory packs removed."""
++    cleaned = []
++    for message in messages or []:
++        if not isinstance(message, dict):
++            cleaned.append(message)
++            continue
++        item = dict(message)
++        content = item.get("content")
++        if isinstance(content, str) and "<memory-context>" in content:
++            item["content"] = _EPHEMERAL_MEMORY_RE.sub("", content).strip()
++        cleaned.append(item)
++    return cleaned
++
+ # 从各子模块导入
+ from .version import __version__
+ from .protocol import (
+@@ -216,6 +235,9 @@
+         self.model = model
+         self.memory = memory
+         self.memory_policy = memory_policy or MemoryPolicy(namespace=memory_namespace)
++        # Set by _add_memory_context / local.memory.inject. Never copied into the user message.
++        self._ephemeral_memory_pack = None
++        self.ephemeral_context_provider = None
+         self.guardrails = GuardrailManager(
+             input_guardrails=input_guardrails,
+             tool_guardrails=tool_guardrails,
+@@ -665,8 +687,18 @@
+             if skills_xml:
+                 system_prompt += f"\n\n## 可用技能\n{skills_xml}\n"
+                 system_prompt += "当用户需求与某个技能描述匹配时，请先使用 activate_skill 工具加载完整指令。"
+-        # 添加记忆上下文
++        # 记忆只进入当次 system/instruction。不要把 pack 拼进用户提问。
++        # 可回滚：改回把 context 前缀拼到 query 上（那是 P0 之前的行为）。
+         query = self._add_memory_context(query, user_id)
++        ephemeral_blocks = []
++        kernel_pack = getattr(self, "_ephemeral_memory_pack", None)
++        if kernel_pack:
++            ephemeral_blocks.append(kernel_pack)
++        profile_pack = self._profile_ephemeral_pack(query, user_id, history)
++        if profile_pack:
++            ephemeral_blocks.append(profile_pack)
++        if ephemeral_blocks:
++            system_prompt += "\n\n" + "\n\n".join(ephemeral_blocks)
+ 
+         # 思维链处理
+         active_tools = []
+@@ -933,7 +965,9 @@
+             "run_group_id": getattr(self, "_run_group_id", None),
+         }
+         if event_type == "model_request":
+-            session_data["messages"] = deepcopy(getattr(self, "chat_params", {}).get("messages", []))
++            # Keep the pack on the live request only. The session copy is the transcript.
++            raw_messages = deepcopy(getattr(self, "chat_params", {}).get("messages", []))
++            session_data["messages"] = _strip_ephemeral_memory(raw_messages)
+         self._record_session_event(session_type, session_data)
+         recorder = getattr(self, "_trace_recorder", None)
+         if recorder:
+@@ -1436,8 +1470,38 @@
+             else:
+                 yield StreamEvent(type="content", data=chunk, trace_id=trace_id)
+ 
++    def _profile_ephemeral_pack(self, query: str, user_id: str, history: list) -> str:
++        """Ask the local profile provider for this turn's pack.
++
++        A provider failure becomes an unavailable notice. It must not be written
++        into the user message, and it must not stop the turn.
++        """
++        provider = getattr(self, "ephemeral_context_provider", None)
++        if not callable(provider):
++            return ""
++        try:
++            text = provider(query=query, user_id=str(user_id), history=list(history or []))
++        except Exception as exc:
++            self.log("ERROR", "profile_pack_unavailable", {"error": f"{type(exc).__name__}: {exc}"})
++            return (
++                "<memory-context>\n"
++                "memory unavailable: 用户画像这一轮没有取到。"
++                "不要对用户说「我什么都不记得」；说明记忆暂时不可用即可。\n"
++                "</memory-context>"
++            )
++        return str(text or "")
++
+     def _add_memory_context(self, query: str, user_id: str) -> str:
+-        """添加记忆上下文"""
++        """检索记忆并挂到当次 ephemeral pack，不改写用户提问。
++
++        P0：检索结果放进 ``_ephemeral_memory_pack``，由调用方追加到 system。
++        返回值始终是原始 ``query``。``store`` 只持久化这句原文，不会把
++        「用户偏好 + 用户提问」整段当成用户内容。``self_learning`` 仍是
++        agent 反思候选，不是用户画像。
++
++        可回滚：恢复 ``return f"{context}\\n##用户提问：\\n{query}"``。
++        """
++        self._ephemeral_memory_pack = None
+         if self.memory is None:
+             return query
+ 
+@@ -1483,7 +1547,9 @@
+                 scope="agent",
+             )
+ 
+-        return f"{context}\n##用户提问：\n{query}" if context else query
++        if context.strip():
++            self._ephemeral_memory_pack = "<memory-context>\n" + context.strip() + "\n</memory-context>"
++        return query
+ 
+     def _retrieve_memory_with_hooks(
+             self,
+--- a/tests/test_memory_policy.py
++++ b/tests/test_memory_policy.py
+@@ -26,6 +26,15 @@
+         return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+ 
+ 
++def _memory_lanes(completions, index=0):
++    """Memory is injected on the system lane, not the user message."""
++    messages = completions.calls[index]["messages"]
++    system = "\n".join(str(item.get("content") or "") for item in messages if item.get("role") == "system")
++    user = "\n".join(str(item.get("content") or "") for item in messages if item.get("role") == "user")
++    assert "<memory-context>" not in user
++    return system, user
++
++
+ class RecordingMemory:
+     def __init__(self, results):
+         self.results = results
+@@ -100,10 +109,11 @@
+     assert result == "done"
+     assert memory.retrieve_calls[0]["user_id"] == "tenant-a:alice"
+     assert memory.store_calls[0]["user_id"] == "tenant-a:alice"
+-    user_message = completions.calls[0]["messages"][-1]["content"]
+-    assert "safe memory" in user_message
+-    assert "other user memory" not in user_message
+-    assert "unattributed memory" not in user_message
++    system, user = _memory_lanes(completions)
++    assert "safe memory" in system
++    assert "safe memory" not in user
++    assert "other user memory" not in system
++    assert "unattributed memory" not in system
+ 
+ 
+ def test_memory_namespace_shortcut_keeps_default_unattributed_results():
+@@ -113,7 +123,9 @@
+     agent.run("hello", user_id="alice")
+ 
+     assert memory.retrieve_calls[0]["user_id"] == "tenant-b:alice"
+-    assert "legacy memory" in completions.calls[0]["messages"][-1]["content"]
++    system, user = _memory_lanes(completions)
++    assert "legacy memory" in system
++    assert "legacy memory" not in user
+ 
+ 
+ def test_memory_policy_filters_by_source_scope_agent_trust_and_confidence():
+@@ -176,11 +188,12 @@
+ 
+     agent.run("hello", user_id="alice")
+ 
+-    user_message = completions.calls[0]["messages"][-1]["content"]
+-    assert "current user preference" in user_message
+-    assert "self reflection should stay private" not in user_message
+-    assert "wrong agent memory" not in user_message
+-    assert "low confidence memory" not in user_message
++    system, user = _memory_lanes(completions)
++    assert "current user preference" in system
++    assert "current user preference" not in user
++    assert "self reflection should stay private" not in system
++    assert "wrong agent memory" not in system
++    assert "low confidence memory" not in system
+ 
+ 
+ def test_memory_policy_filters_expired_memory_results():
+@@ -196,10 +209,11 @@
+ 
+     agent.run("hello", user_id="alice")
+ 
+-    user_message = completions.calls[0]["messages"][-1]["content"]
+-    assert "fresh memory" in user_message
+-    assert "expired memory" not in user_message
+-    assert "missing expiry" not in user_message
++    system, user = _memory_lanes(completions)
++    assert "fresh memory" in system
++    assert "fresh memory" not in user
++    assert "expired memory" not in system
++    assert "missing expiry" not in system
+ 
+ 
+ def test_memory_policy_rejects_missing_scope_metadata_when_filters_are_enabled():
+@@ -215,7 +229,9 @@
+ 
+     agent.run("hello", user_id="alice")
+ 
+-    assert "legacy unattributed memory" not in completions.calls[0]["messages"][-1]["content"]
++    system, user = _memory_lanes(completions)
++    assert "legacy unattributed memory" not in system
++    assert "legacy unattributed memory" not in user
+ 
+ 
+ def test_memory_scope_exports_recommended_metadata_shape():
+@@ -694,9 +710,10 @@
+ 
+     assert result.content == "done"
+     assert memory.retrieve_calls[0] == {"query": "rewritten query", "user_id": "tenant-a:alice"}
+-    user_message = completions.calls[0]["messages"][-1]["content"]
+-    assert "allowed memory" in user_message
+-    assert "blocked memory" not in user_message
++    system, user = _memory_lanes(completions)
++    assert "allowed memory" in system
++    assert "allowed memory" not in user
++    assert "blocked memory" not in system
+     memory_phases = [phase for phase, _ in calls if phase in ("before_memory_retrieve", "after_memory_retrieve")]
+     assert memory_phases == ["before_memory_retrieve", "after_memory_retrieve"]
+     assert any(event["type"] == "hook_decision" for event in result.trace)
+@@ -724,7 +741,9 @@
+ 
+     assert result.content == "done"
+     assert memory.retrieve_calls == []
+-    assert "should not appear" not in completions.calls[0]["messages"][-1]["content"]
++    system, user = _memory_lanes(completions)
++    assert "should not appear" not in system
++    assert "should not appear" not in user
+     assert any(event["type"] == "memory_retrieve_block" for event in result.trace)
+ 
+ 
+--- a/tests/test_graph_memory_security.py
++++ b/tests/test_graph_memory_security.py
+@@ -23,6 +23,14 @@
+         return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+ 
+ 
++def _memory_lanes(completions, index=0):
++    messages = completions.calls[index]["messages"]
++    system = "\n".join(str(item.get("content") or "") for item in messages if item.get("role") == "system")
++    user = "\n".join(str(item.get("content") or "") for item in messages if item.get("role") == "user")
++    assert "<memory-context>" not in user
++    return system, user
++
++
+ class MutatingSharedGraphBackend:
+     """Fake backend reproducing destructive cross-user graph mutation."""
+ 
+@@ -159,10 +167,12 @@
+         trace=True,
+     )
+ 
+-    prompt = completions.calls[0]["messages"][-1]["content"]
++    system, user = _memory_lanes(completions)
+     assert victim_result.content == "done"
+-    assert "Safepril" in prompt
+-    assert "Alerzol" not in prompt
++    assert "Safepril" in system
++    assert "Safepril" not in user
++    assert "Alerzol" not in system
++    assert "Alerzol" not in user
+     victim_filter = next(
+         event for event in victim_result.trace
+         if event["type"] == "memory_retrieve_filter"
+@@ -196,9 +206,11 @@
+         trace=True,
+     )
+ 
+-    prompt = completions.calls[0]["messages"][-1]["content"]
+-    assert "unattributed graph fact" not in prompt
+-    assert "low trust graph fact" not in prompt
++    system, user = _memory_lanes(completions)
++    assert "unattributed graph fact" not in system
++    assert "unattributed graph fact" not in user
++    assert "low trust graph fact" not in system
++    assert "low trust graph fact" not in user
+     filtered = next(
+         event for event in result.trace
+         if event["type"] == "memory_retrieve_filter"
+@@ -303,12 +315,13 @@
+ 
+     result = victim.run("fact", user_id="victim", result_format="object", trace=True)
+ 
+-    prompt = completions.calls[0]["messages"][-1]["content"]
+-    assert "allowed fact" in prompt
+-    assert "cross-user fact" not in prompt
+-    assert "wrong-agent fact" not in prompt
+-    assert "low-trust fact" not in prompt
+-    assert "unattributed fact" not in prompt
++    system, user = _memory_lanes(completions)
++    assert "allowed fact" in system
++    assert "allowed fact" not in user
++    assert "cross-user fact" not in system
++    assert "wrong-agent fact" not in system
++    assert "low-trust fact" not in system
++    assert "unattributed fact" not in system
+     filtered = next(event for event in result.trace if event["type"] == "memory_retrieve_filter")
+     assert filtered["data"] == {
+         "user_id": "victim",
+--- a/tests/test_clawmem_memory_adapter_example.py
++++ b/tests/test_clawmem_memory_adapter_example.py
+@@ -169,9 +169,14 @@
+ 
+     result = agent.run("Where should I travel next?", user_id="alice", result_format="object", trace=True)
+ 
+-    prompt = completions.calls[0]["messages"][-1]["content"]
++    messages = completions.calls[0]["messages"]
++    system = messages[0]["content"]
++    user = messages[-1]["content"]
++    assert messages[-1]["role"] == "user"
++    assert "<memory-context>" not in user
+     assert result.content == "done"
+-    assert "Alice prefers quiet beach towns" in prompt
+-    assert "Reflection draft should stay private" not in prompt
++    assert "Alice prefers quiet beach towns" in system
++    assert "Alice prefers quiet beach towns" not in user
++    assert "Reflection draft should stay private" not in system
+     assert client.created_payloads[0]["user_id"] == "tenant:alice"
+     assert client.created_payloads[0]["metadata"]["original_user_id"] == "alice"
+--- a/tests/test_memcode_memory_adapter_example.py
++++ b/tests/test_memcode_memory_adapter_example.py
+@@ -214,14 +214,20 @@
+ 
+     result = agent.run("What does Alice prefer?", user_id="alice", result_format="object", trace=True)
+     assert result.error is None
+-    prompt = completions.calls[-1]["messages"][-1]["content"]
+-    assert "Alice prefers quiet beach towns" in prompt
++    messages = completions.calls[-1]["messages"]
++    system = messages[0]["content"]
++    user = messages[-1]["content"]
++    assert "<memory-context>" not in user
++    assert "Alice prefers quiet beach towns" in system
++    assert "Alice prefers quiet beach towns" not in user
+     filtered = next(event for event in result.trace if event["type"] == "memory_retrieve_filter")
+     assert filtered["data"]["allowed_count"] >= 1
+ 
+     bob = agent.run("What do I prefer?", user_id="bob", result_format="object", trace=True)
+     assert bob.error is None
+-    assert "Alice prefers quiet beach towns" not in completions.calls[-1]["messages"][-1]["content"]
++    bob_messages = completions.calls[-1]["messages"]
++    bob_blob = "\n".join(str(item.get("content") or "") for item in bob_messages)
++    assert "Alice prefers quiet beach towns" not in bob_blob
+     assert client.search_calls[-1]["context_space_id"] == "space-bob"
+     assert client.ingest_calls[-1]["metadata"]["user_id"] == "demo:bob"
+     assert phases == ["before_memory_retrieve", "after_memory_retrieve"] * 3
+--- a/tests/integration/test_mem0_graph_security_opt_in.py
++++ b/tests/integration/test_mem0_graph_security_opt_in.py
+@@ -133,9 +133,14 @@
+             result_format="object",
+             trace=True,
+         )
+-        prompt = completions.calls[0]["messages"][-1]["content"]
+-        assert trusted_drug in prompt
+-        assert poisoned_drug not in prompt
++        messages = completions.calls[0]["messages"]
++        system = messages[0]["content"]
++        user = messages[-1]["content"]
++        assert "<memory-context>" not in user
++        assert trusted_drug in system
++        assert trusted_drug not in user
++        assert poisoned_drug not in system
++        assert poisoned_drug not in user
+         filtered = next(event for event in result.trace if event["type"] == "memory_retrieve_filter")
+         assert filtered["data"]["allowed_count"] >= 1
+         assert filtered["data"]["blocked_count"] >= 0
+--- a/README.md
++++ b/README.md
+@@ -1,4 +1,6 @@
+ 
++> 本工作区在 LightAgent 上加了个人生活助手的 P0 用户画像。记忆包只注入当次请求的 system 侧，不写回用户消息。用法和测试见 `local/memory/README.md`。`python -m pytest local/memory/tests -q` 不调用 OpenRouter。
++
+ ![LightAgent Banner](docs/images/lightagent-banner.jpg)
+ <div align="center">
+   <p>
+--- a/.gitignore
++++ b/.gitignore
+@@ -4,3 +4,6 @@
+ LightAgent/__pycache__/__init__.cpython-311.pyc
+ LightAgent/__pycache__/la_core.cpython-311.pyc
+ dist/
++local/memory/store/*.sqlite
++local/memory/store/*.sqlite-*
++local/.openrouter_usage.json
+--- a/local/tui/tools.py
++++ b/local/tui/tools.py
+@@ -3,6 +3,7 @@
+ 内置一等联网工具见 local.tools.web（web_search / web_fetch），不是插件。
+ """
+ 
++from local.memory.tools import MEMORY_TOOLS
+ from local.tools.web import web_fetch, web_search
+ 
+ 
+@@ -19,4 +20,4 @@
+     ],
+ }
+ 
+-TOOLS = [get_weather, web_search, web_fetch]
++TOOLS = [get_weather, web_search, web_fetch, *MEMORY_TOOLS]
+--- a/local/tui/app.py
++++ b/local/tui/app.py
+@@ -17,6 +17,8 @@
+ from textual.containers import Horizontal, Vertical, VerticalScroll
+ from textual.widgets import Input, Label, ListItem, ListView, Markdown, Static, TabbedContent, TabPane
+ 
++from local.memory.host import MemoryHost, bind_host
++from local.memory.tui_panel import MemoryPanel
+ from local.tui.projects import Project, fmt_ago, touch
+ from local.tui.trace import (
+     LANE_COLOR,
+@@ -335,6 +337,7 @@
+         Binding("ctrl+l", "clear", "清空"),
+         Binding("ctrl+1", "tab_chat", "对话"),
+         Binding("ctrl+2", "tab_trace", "轨迹"),
++        Binding("ctrl+3", "tab_memory", "记忆"),
+         Binding("ctrl+u", "toggle_context", "上下文", priority=True),
+         Binding("ctrl+f", "focus_trace_search", "搜轨迹"),
+         Binding("escape", "clear_trace_filters", "清除筛选"),
+@@ -397,6 +400,8 @@
+                 with TabbedContent(id="tabs"):
+                     with TabPane("对话", id="tab-chat"):
+                         yield VerticalScroll(id="chat")
++                    with TabPane("记忆", id="tab-memory"):
++                        yield MemoryPanel()
+                     with TabPane("轨迹", id="tab-trace"):
+                         with Vertical(id="trace-pane"):
+                             with Horizontal(id="trace-meta"):
+@@ -427,11 +432,20 @@
+     def on_mount(self) -> None:
+         self.theme = "textual-light"
+         self.query_one("#context-dock").display = False
++        self._sync_memory_host()
+         self.rebuild_nav()
+         self.load_session(self.current)
+         self.update_stats()
+         self.query_one("#prompt").focus()
+ 
++    def _sync_memory_host(self) -> None:
++        bind_host(MemoryHost(
++            user_id="local-user",
++            namespace="profile",
++            session_id=self.current.id,
++            agent_id="lightagent-tui",
++        ))
++
+ 
+     # ---------- 侧栏：项目 / 会话 ----------
+     def sessions_in_project(self, project: Project) -> list[Session]:
+@@ -478,6 +492,7 @@
+ 
+     def select_session(self, session: Session) -> None:
+         self.current = session
++        self._sync_memory_host()
+         if session.project_id:
+             self.active_project = next((p for p in self.projects if p.id == session.project_id), self.active_project)
+         self.load_session(session)
+@@ -517,6 +532,7 @@
+             self.active_project = project
+         self.sessions.insert(0, s)
+         self.current = s
++        self._sync_memory_host()
+         self.rebuild_nav()
+         self.load_session(s)
+         self.query_one("#prompt").focus()
+@@ -952,6 +968,13 @@
+         self.query_one("#tabs", TabbedContent).active = "tab-trace"
+         self.refresh_trace(self.current)
+ 
++    def action_tab_memory(self) -> None:
++        self.query_one("#tabs", TabbedContent).active = "tab-memory"
++        try:
++            self.query_one(MemoryPanel).refresh_rows()
++        except Exception:
++            pass
++
+     def action_focus_trace_search(self) -> None:
+         self.action_tab_trace()
+         self.query_one("#trace-search").focus()
+--- a/local/tui/app.tcss
++++ b/local/tui/app.tcss
+@@ -603,3 +603,12 @@
+     border: round #e0e0e5;
+     margin: 1;
+ }
++
++/* ---------- Memory panel ---------- */
++.memory-panel { height: 100%; padding: 1 2; }
++.mem-hint { height: 1; color: #8e8e93; margin: 0 0 1 0; }
++#mem-list { height: 1fr; border: round #d4d4d8; background: transparent; }
++.mem-actions { height: 3; margin: 1 0 0 0; }
++.mem-actions Button { margin: 0 1 0 0; }
++#mem-status { height: 2; color: #3f3f46; }
++#tab-memory Input { margin: 0 0 1 0; }
+--- a/local/tui/backend.py
++++ b/local/tui/backend.py
+@@ -88,12 +88,15 @@
+         steps: list[TraceStep] = []
+         calls: list[str] = []
+ 
+-        # 上下文快照
++        # 上下文快照。mock 不发请求，但按正式路径组装 ephemeral pack，且不改用户原话。
++        from local.memory.inject import prepare_turn
++
++        prepared = prepare_turn(system="LightAgent 中文助手", history=history, user_text=prompt)
+         steps.append(
+             TraceStep(
+                 kind="context",
+-                summary=f"会话上下文 · 历史 {len(history)} 条",
+-                detail=f"instructions=LightAgent 中文助手 · model={self.name}",
++                summary=f"会话上下文 · 历史 {len(history)} 条 · ephemeral pack",
++                detail=prepared.detail,
+                 tokens=80 + len(history) * 12,
+                 duration_ms=8,
+                 lane="other",
+@@ -263,7 +266,13 @@
+             try:
+                 self._tools = _merged_tools()  # 每次对话热加载插件工具
+                 agent = orc.make_agent(model=model, instructions=self.instructions)
+-                res = agent.run(prompt, tools=self._tools, history=list(history), result_format="object")
++                res = agent.run(
++                    prompt,
++                    tools=self._tools,
++                    history=list(history),
++                    result_format="object",
++                    user_id="local-user",
++                )
+                 text = res.content or res.error or ""
+                 calls_raw = list(res.tool_calls or [])
+                 if calls_raw:
+--- a/local/tools/__init__.py
++++ b/local/tools/__init__.py
+@@ -1,5 +1,6 @@
+ """Shared first-class tools for LightAgent local forks (not plugins)."""
+ 
++from local.memory.tools import MEMORY_TOOLS
+ from .web import web_fetch, web_search
+ 
+-__all__ = ["web_search", "web_fetch"]
++__all__ = ["MEMORY_TOOLS", "web_search", "web_fetch"]
+--- a/local/openrouter_config.py
++++ b/local/openrouter_config.py
+@@ -70,7 +70,12 @@
+ def make_agent(model: str = DEFAULT_MODEL, **kwargs):
+     _assert_free(model)
+     from LightAgent import LightAgent
+-    return LightAgent(model=model, api_key=get_api_key(), base_url=OPENROUTER_BASE_URL, **kwargs)
++    from local.memory.inject import attach_profile_memory
++
++    agent = LightAgent(model=model, api_key=get_api_key(), base_url=OPENROUTER_BASE_URL, **kwargs)
++    # Profile pack is local. This does not call OpenRouter.
++    attach_profile_memory(agent, user_id=os.environ.get("LIGHTAGENT_USER_ID", "local-user"))
++    return agent
+ 
+ 
+ _FALLBACK_HINTS = ("429", "402", "rate limit", "rate-limit", "quota", "insufficient", "credits", "404", "no endpoints", "unavailable")

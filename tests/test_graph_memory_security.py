@@ -23,6 +23,14 @@ class StaticCompletions:
         return SimpleNamespace(choices=[SimpleNamespace(message=message)])
 
 
+def _memory_lanes(completions, index=0):
+    messages = completions.calls[index]["messages"]
+    system = "\n".join(str(item.get("content") or "") for item in messages if item.get("role") == "system")
+    user = "\n".join(str(item.get("content") or "") for item in messages if item.get("role") == "user")
+    assert "<memory-context>" not in user
+    return system, user
+
+
 class MutatingSharedGraphBackend:
     """Fake backend reproducing destructive cross-user graph mutation."""
 
@@ -159,10 +167,12 @@ def test_secure_policy_blocks_mutation_and_cross_user_prompt_injection():
         trace=True,
     )
 
-    prompt = completions.calls[0]["messages"][-1]["content"]
+    system, user = _memory_lanes(completions)
     assert victim_result.content == "done"
-    assert "Safepril" in prompt
-    assert "Alerzol" not in prompt
+    assert "Safepril" in system
+    assert "Safepril" not in user
+    assert "Alerzol" not in system
+    assert "Alerzol" not in user
     victim_filter = next(
         event for event in victim_result.trace
         if event["type"] == "memory_retrieve_filter"
@@ -196,9 +206,11 @@ def test_secure_policy_quarantines_unattributed_and_low_trust_facts():
         trace=True,
     )
 
-    prompt = completions.calls[0]["messages"][-1]["content"]
-    assert "unattributed graph fact" not in prompt
-    assert "low trust graph fact" not in prompt
+    system, user = _memory_lanes(completions)
+    assert "unattributed graph fact" not in system
+    assert "unattributed graph fact" not in user
+    assert "low trust graph fact" not in system
+    assert "low trust graph fact" not in user
     filtered = next(
         event for event in result.trace
         if event["type"] == "memory_retrieve_filter"
@@ -303,12 +315,13 @@ def test_secure_policy_enforces_tenant_provenance_and_trust_with_exact_audit_cou
 
     result = victim.run("fact", user_id="victim", result_format="object", trace=True)
 
-    prompt = completions.calls[0]["messages"][-1]["content"]
-    assert "allowed fact" in prompt
-    assert "cross-user fact" not in prompt
-    assert "wrong-agent fact" not in prompt
-    assert "low-trust fact" not in prompt
-    assert "unattributed fact" not in prompt
+    system, user = _memory_lanes(completions)
+    assert "allowed fact" in system
+    assert "allowed fact" not in user
+    assert "cross-user fact" not in system
+    assert "wrong-agent fact" not in system
+    assert "low-trust fact" not in system
+    assert "unattributed fact" not in system
     filtered = next(event for event in result.trace if event["type"] == "memory_retrieve_filter")
     assert filtered["data"] == {
         "user_id": "victim",

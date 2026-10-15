@@ -1,0 +1,356 @@
+version: 1
+cases:
+- id: L3-I01
+  dim: intent
+  tier: l3
+  title: 「今天吃什么」不建 goal（4day D1-01）
+  mode: store
+  store_action: maybe_open_goal
+  turns:
+  - role: user
+    text: 今天吃什么
+  expect:
+    stores:
+    - check: should_not_create_goal
+    - check: no_active_goal
+- id: L3-I02
+  dim: intent
+  tier: l3
+  title: 「吃什么好」不建 goal（D2-04）
+  mode: store
+  store_action: maybe_open_goal
+  turns:
+  - role: user
+    text: 吃什么好
+  expect:
+    stores:
+    - check: should_not_create_goal
+- id: L3-I03
+  dim: intent
+  tier: l3
+  title: 「我想健身」不建 goal（D2-07）
+  mode: store
+  store_action: maybe_open_goal
+  turns:
+  - role: user
+    text: 我想健身
+  expect:
+    stores:
+    - check: should_not_create_goal
+- id: L3-I04
+  dim: intent
+  tier: l3
+  title: 单字「海鲜」不入卡（D3-09）
+  mode: store
+  store_action: classify
+  turns:
+  - role: user
+    text: 海鲜
+  expect:
+    stores:
+    - check: classify_none
+- id: L3-I05
+  dim: intent
+  tier: l3
+  title: 忌口海鲜 absorb（D1-02）
+  mode: store
+  store_action: absorb
+  turns:
+  - role: user
+    text: 忌口：海鲜
+  expect:
+    stores:
+    - check: constraint_contains
+      args:
+        needle: 海鲜
+- id: L3-I06
+  dim: intent
+  tier: l3
+  title: 「其实可以吃虾」supersede（D2-02）
+  mode: store
+  store_action: absorb
+  setup:
+  - absorb: 忌口：海鲜
+  turns:
+  - role: user
+    text: 其实可以吃虾
+  expect:
+    stores:
+    - check: constraint_superseded
+      args:
+        old_needle: 海鲜
+- id: L3-I07
+  dim: intent
+  tier: l3
+  title: 「提醒我一下」无 cadence 拒识（D1-07）
+  mode: store
+  store_action: parse_routine
+  turns:
+  - role: user
+    text: 提醒我一下
+  expect:
+    stores:
+    - check: parse_routine_none
+    invariants:
+    - routine_not_run
+- id: L3-I08
+  dim: intent
+  tier: l3
+  title: 「每周一叫我称重」建例程不跑（D2-05）
+  mode: store
+  store_action: parse_routine
+  create_if_parsed: true
+  turns:
+  - role: user
+    text: 每周一叫我称重
+  expect:
+    stores:
+    - check: parse_routine_weekly
+    - check: routine_created_not_run
+    invariants:
+    - routine_not_run
+- id: L3-D01
+  dim: decompose
+  tier: l3
+  title: 显式制定计划建 goal（D1-03）
+  mode: store
+  store_action: maybe_open_goal
+  setup:
+  - absorb: 忌口：海鲜
+  turns:
+  - role: user
+    text: 帮我制定一周健身与饮食计划
+  expect:
+    stores:
+    - check: should_create_goal
+    - check: goal_one_in_progress
+    - check: constraint_contains
+      args:
+        needle: 海鲜
+- id: L3-D02
+  dim: decompose
+  tier: l3
+  title: 「训练日定好了」推进（D1-05）
+  mode: store
+  store_action: advance
+  setup:
+  - open_goal: 帮我制定一周健身与饮食计划
+  turns:
+  - role: user
+    text: 训练日定好了
+  expect:
+    stores:
+    - check: goal_advanced
+- id: L3-D03
+  dim: decompose
+  tier: l3
+  title: 「今天天气呢」不推进（D1-04）
+  mode: store
+  store_action: advance
+  setup:
+  - open_goal: 帮我制定一周健身与饮食计划
+  turns:
+  - role: user
+    text: 今天天气呢
+  expect:
+    stores:
+    - check: goal_one_in_progress
+- id: L3-D04
+  dim: decompose
+  tier: l3
+  title: cancel → resume 同 goal_id（D3-02/03）
+  mode: store
+  store_action: resume
+  setup:
+  - open_goal: 帮我制定一周健身与饮食计划
+  - cancel_goal: true
+  turns:
+  - role: user
+    text: 继续
+  expect:
+    stores:
+    - check: resume_same_goal
+- id: L3-D05
+  dim: decompose
+  tier: l3
+  title: 「别再给我花生」同义忌口（D2-03）
+  mode: store
+  store_action: absorb
+  turns:
+  - role: user
+    text: 别再给我花生
+  expect:
+    stores:
+    - check: constraint_contains
+      args:
+        needle: 花生
+- id: L3-C01
+  dim: context
+  tier: l3
+  title: sanitize_transcript 无 memory-context（D1-09）
+  mode: store
+  store_action: sanitize
+  turns:
+  - role: user
+    text: (sanitize probe)
+  expect:
+    stores:
+    - check: sanitize_clean
+    invariants:
+    - no_memory_context_leak
+- id: L3-C02
+  dim: context
+  tier: l3
+  title: Memory pin「叫我小Q」（D2-09）
+  mode: store
+  store_action: sanitize
+  setup:
+  - memory_learn_pin: 叫我小Q
+  turns:
+  - role: user
+    text: (pin probe)
+  expect:
+    stores:
+    - check: memory_pinned_contains
+      args:
+        needle: 小Q
+- id: L3-C03
+  dim: context
+  tier: l3
+  title: 确认提醒后 runner 恰 1 次（D3-01）
+  mode: store
+  store_action: confirm_routine
+  setup:
+  - create_routine: 每周一叫我称重
+  turns:
+  - role: user
+    text: 确认提醒
+  expect:
+    stores:
+    - check: routine_ran_once
+- id: L3-C04
+  dim: context
+  tier: l3
+  title: workspace 落盘无 memory-context（D4-09）
+  mode: store
+  store_action: absorb
+  setup:
+  - absorb: 忌口：海鲜
+  - open_goal: 帮我制定一周健身与饮食计划
+  turns:
+  - role: user
+    text: 忌口：花生酱
+  expect:
+    stores:
+    - check: constraint_contains
+      args:
+        needle: 花生
+    invariants:
+    - no_memory_context_leak
+- id: L3-T01
+  dim: tool
+  tier: l3
+  title: live 上海天气 → get_weather
+  mode: live_agent
+  turns:
+  - role: user
+    text: 查一下上海的天气，请调用天气工具。
+  expect:
+    tools:
+      must:
+      - get_weather
+      forbid: []
+      extra: allow
+- id: L3-T02
+  dim: tool
+  tier: l3
+  title: live 网页搜索清淡餐厅
+  mode: live_agent
+  turns:
+  - role: user
+    text: 请用网页搜索查附近清淡餐厅的建议（联网搜索即可）。
+  expect:
+    tools:
+      must:
+      - web_search
+      forbid:
+      - memory_learn
+      extra: allow
+- id: L3-T03
+  dim: tool
+  tier: l3
+  title: live 闲聊拒调 web/memory
+  mode: live_agent
+  turns:
+  - role: user
+    text: 随便聊聊周末计划，不要查网，也不要记住任何内容。
+  expect:
+    tools:
+      must: []
+      forbid:
+      - web_search
+      - web_fetch
+      - memory_learn
+      extra: allow
+- id: L3-T04
+  dim: tool
+  tier: l3
+  title: live 摘要给定 URL → web_fetch
+  mode: live_agent
+  turns:
+  - role: user
+    text: 请用网页抓取工具摘要这个页面 https://example.com ，不要搜索。
+  expect:
+    tools:
+      must:
+      - web_fetch
+      forbid: []
+      extra: allow
+- id: L3-T05
+  dim: tool
+  tier: l3
+  title: live 天气+搜索（允许 parallel）
+  mode: live_agent
+  turns:
+  - role: user
+    text: 请同时查北京天气，并用网页搜索「居家徒手健身课表」，两个都要做。
+  expect:
+    tools:
+      must:
+      - get_weather
+      - web_search
+      forbid: []
+      extra: allow
+- id: L3-X01
+  dim: context
+  tier: l3
+  title: live 忌口后推荐海鲜火锅（硬卡+软回复）
+  mode: live_agent
+  setup:
+  - absorb: 忌口：海鲜
+  turns:
+  - role: user
+    text: 今晚推荐个海鲜火锅套餐
+  expect:
+    stores:
+    - check: constraint_contains
+      args:
+        needle: 海鲜
+    invariants:
+    - reply_avoid_seafood_primary
+- id: L3-X02
+  dim: intent
+  tier: l3
+  title: live 短问吃什么 — 不应无端 memory_learn
+  mode: live_agent
+  turns:
+  - role: user
+    text: 今天吃什么好呢？简单给点建议就行。
+  expect:
+    tools:
+      must: []
+      forbid:
+      - memory_learn
+      extra: allow
+    invariants:
+    - no_new_goal

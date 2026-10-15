@@ -1,0 +1,375 @@
+-            key=lambda x: x.updated_at,
++            [
++                session
++                for session in self.sessions
++                if session.id not in in_proj and session.project_id is None and not session.hidden
++            ],
++            key=lambda item: item.updated_at,
+             reverse=True,
+         )
+ 
++    def workspace_state(self) -> Workspace:
++        return Workspace(
++            conversations=[meta_from_session(session) for session in self.sessions],
++            projects=[
++                ProjectGroup(
++                    name=project.name,
++                    id=project.id,
++                    expanded=project.expanded,
++                    session_ids=list(project.session_ids),
++                )
++                for project in self.projects
++            ],
++            show_hidden=self._show_hidden,
++            collaboration_enabled=self.collaboration_enabled,
++        )
++
++    def write_workspace(self, ws: Workspace) -> None:
++        by_id = {session.id: session for session in self.sessions}
++        kept: list[Session] = []
++        for meta in ws.conversations:
++            session = by_id.get(meta.id)
++            if session is None:
++                session = Session(meta.title, id=meta.id, avatar=meta.avatar, accent=meta.accent)
++            apply_meta_to_session(session, meta)
++            kept.append(session)
++        self.sessions = kept
++        if self.current.id not in {session.id for session in kept}:
++            self.current = kept[0] if kept else self.current
++        else:
++            self.current = next(session for session in kept if session.id == self.current.id)
++        old = {project.id: project for project in self.projects}
++        projects: list[Project] = []
++        for group in ws.projects:
++            project = old.get(group.id) or Project(group.name, id=group.id)
++            project.name = group.name
++            project.expanded = group.expanded
++            project.session_ids = list(group.session_ids)
++            projects.append(project)
++        self.projects = projects
++        self._bind_collaboration()
++
++    def persist_workspace(self) -> None:
++        if not self._persist:
++            return
++        ws = self.workspace_state()
++        stored = StoredWorkspace(
++            projects=ws.projects,
++            conversations=ws.conversations,
++            transcripts={
++                session.id: Transcript(
++                    messages=list(session.messages),
++                    events=[[kind, text] for kind, text in session.events],
++                    trace=trace_to_dict(session),
++                )
++                for session in self.sessions
++            },
++        )
++        save_workspace(self._workspace_dir, stored)
++
++    def _mutate(self, session: Session, action: str, **payload):
++        ws = self.workspace_state()
++        result = apply_action(ws, session.id, action, **payload)
++        if result.ok and not result.needs_confirm:
++            self.write_workspace(ws)
++            self.persist_workspace()
++        return result, ws
++
+     def rebuild_nav(self) -> None:
+-        pl = self.query_one("#project-list", Vertical)
+-        ul = self.query_one("#ungrouped-list", Vertical)
+-        pl.remove_children()
+-        ul.remove_children()
+-        q = self._nav_filter.strip().lower()
+-        for proj in self.projects:
+-            sess = self.sessions_in_project(proj)
+-            if q:
+-                name_hit = q in proj.name.lower()
+-                sess = [s for s in sess if name_hit or q in s.title.lower() or q in s.preview.lower()]
+-                if not name_hit and not sess:
++        pinned_box = self.query_one("#pinned-list", Vertical)
++        project_box = self.query_one("#project-list", Vertical)
++        ungrouped_box = self.query_one("#ungrouped-list", Vertical)
++        pinned_box.remove_children()
++        project_box.remove_children()
++        ungrouped_box.remove_children()
++        query = self._nav_filter.strip().lower()
++        sections = sidebar_sections(self.workspace_state())
++        by_id = {session.id: session for session in self.sessions}
++
++        def matches(session: Session) -> bool:
++            if not query:
++                return True
++            return query in session.title.lower() or query in session.preview.lower()
++
++        pinned = [by_id[meta.id] for meta in sections["pinned"] if meta.id in by_id and matches(by_id[meta.id])]
++        self.query_one("#pinned-section", Label).display = bool(pinned)
++        for session in pinned:
++            pinned_box.mount(SessionRow(session, nested=False))
++        for group in sections["projects"]:
++            project = next((item for item in self.projects if item.id == group["project"].id), None)
++            if project is None:
++                continue
++            members = [by_id[meta.id] for meta in group["sessions"] if meta.id in by_id]
++            if query:
++                name_hit = query in project.name.lower()
++                members = [session for session in members if name_hit or matches(session)]
++                if not name_hit and not members:
+                     continue
+-            pl.mount(ProjectRow(proj, sess))
+-        for s in self.ungrouped_sessions():
+-            if q and q not in s.title.lower() and q not in s.preview.lower():
++            project_box.mount(ProjectRow(project, members))
++        for meta in sections["ungrouped"]:
++            session = by_id.get(meta.id)
++            if session is None or not matches(session):
+                 continue
+-            ul.mount(SessionRow(s, nested=False))
+-        # 刷新选中态
++            ungrouped_box.mount(SessionRow(session, nested=False))
+         for row in self.query(SessionRow):
+             if row.session is self.current:
+                 row.add_class("selected")
+             else:
+                 row.remove_class("selected")
++        hidden_btn = self.query_one("#show-hidden-btn", Static)
++        hidden_btn.update("隐藏已隐藏项" if self._show_hidden else "显示已隐藏")
+ 
+     def select_session(self, session: Session) -> None:
+         self.current = session
++        if session.unread:
++            self._mutate(session, "mark_read")
++            session = self.current
+         self._sync_memory_host()
+         if session.project_id:
+-            self.active_project = next((p for p in self.projects if p.id == session.project_id), self.active_project)
++            self.active_project = next((project for project in self.projects if project.id == session.project_id), self.active_project)
+         self.load_session(session)
+         self.rebuild_nav()
+         self.query_one("#prompt").focus()
+@@ -517,6 +838,7 @@
+         self.projects.insert(0, proj)
+         self.active_project = proj
+         self.rebuild_nav()
++        self.persist_workspace()
+         return proj
+ 
+     def new_session_in_project(self, project: Project | None = None) -> Session:
+@@ -527,14 +849,17 @@
+         touch(s)
+         if project is not None:
+             s.project_id = project.id
++            s.space_id = project.id
+             project.session_ids.insert(0, s.id)
+             project.expanded = True
+             self.active_project = project
+         self.sessions.insert(0, s)
+         self.current = s
+         self._sync_memory_host()
++        self._bind_collaboration()
+         self.rebuild_nav()
+         self.load_session(s)
++        self.persist_workspace()
+         self.query_one("#prompt").focus()
+         return s
+ 
+@@ -707,7 +1032,11 @@
+         chat.scroll_end(animate=False)
+         av = self.query_one("#h-avatar", Static)
+         av.update(s.avatar)
+-        self.query_one("#h-title", Label).update(f"[b]{s.title}[/]")
++        role = (s.identity.role_title or "").strip()
++        title = f"[b]{s.title}[/]"
++        if role:
++            title += f"  [#2563eb]{role}[/]"
++        self.query_one("#h-title", Label).update(title)
+         self.query_one("#h-model", Label).update(f"模型 · {self.backend.name}")
+         self.refresh_trace(s)
+         self.update_stats()
+@@ -871,7 +1200,7 @@
+                 f"{'⠋⠙⠹⠸⠼⠴⠦⠧'[i % 8]}  LightAgent 思考中…  {rate:.0f} tok/s",
+             )
+         try:
+-            reply = self.backend.chat(history, text)
++            reply = self.backend.chat(history, text, turn=self.turn_context(s))
+         except Exception as e:  # 包括本地额度保护抛出的错误
+             self.call_from_thread(self.finish, s, text, None, str(e))
+             return
+@@ -919,6 +1248,7 @@
+         self.refresh_trace(s)
+         self.update_stats()
+         self.rebuild_nav()
++        self.persist_workspace()
+ 
+     @on(Input.Changed, "#search")
+     def filter_sessions(self, event: Input.Changed) -> None:
+@@ -942,6 +1272,169 @@
+             self.action_toggle_context()
+         elif wid == "tm-calls":
+             self.toggle_kind_filter("tool")
++        elif wid == "show-hidden-btn":
++            self._show_hidden = not self._show_hidden
++            self.rebuild_nav()
++        elif wid == "group-chat-btn":
++            self.notify("群聊还没做。先用 @身份 或 delegate_to_bot 请另一个 Bot 帮忙。")
++
++    def turn_context(self, session: Session):
++        from local.tui.backend import TurnContext
++
++        self._bind_collaboration()
++        meta = meta_from_session(session)
++        persona_text, identity_block = blocks_for_meta(meta)
++        from local.conversations.collaborate import get_runtime
++
++        runtime = get_runtime()
++        return TurnContext(
++            identity_block=identity_block,
++            persona_text=persona_text,
++            share_user_profile=session.share_user_profile,
++            session_id=session.id,
++            agent_id=session.agent_id,
++            space_id=session.space_id or session.project_id,
++            collaboration_enabled=self.collaboration_enabled,
++            roster=list(runtime.roster),
++            quota=runtime.quota,
++        )
++
++    def open_session_menu(self, session: Session) -> None:
++        from local.tui.identity_ui import ConversationMenuScreen
++
++        entries = menu_entries(meta_from_session(session))
++        self.push_screen(ConversationMenuScreen(session.title, entries), lambda action: self._on_menu(session, action))
++
++    def _on_menu(self, session: Session, action: str | None) -> None:
++        if not action:
++            return
++        if action == "rename":
++            self._rename_session(session)
++            return
++        if action == "move":
++            self._move_session(session)
++            return
++        if action == "set_identity":
++            self.open_identity_editor(session)
++            return
++        if action == "delete":
++            self.confirm_delete_session(session)
++            return
++        if action == "copy_id":
++            result, _ws = self._mutate(session, "copy_id")
++            copied = result.copied_id or session.id
++            try:
++                self.copy_to_clipboard(copied)
++            except Exception:
++                pass
++            self.notify(f"对话 ID：{copied}")
++            return
++        result, _ws = self._mutate(session, action)
++        if not result.ok:
++            self.notify(result.message)
++            return
++        self.rebuild_nav()
++        if session.id == self.current.id:
++            self.load_session(self.current)
++
++    def _rename_session(self, session: Session) -> None:
++        from local.tui.identity_ui import RenameScreen
++
++        def done(title: str | None) -> None:
++            if not title:
++                return
++            previous = session.id
++            result, _ws = self._mutate(session, "rename", title=title)
++            if not result.ok:
++                self.notify(result.message)
++                return
++            if self.current.id != previous:
++                self.notify("重命名不应改变 id")
++            self.rebuild_nav()
++            self.load_session(self.current)
++
++        self.push_screen(RenameScreen(session.title), done)
++
++    def _move_session(self, session: Session) -> None:
++        from local.tui.identity_ui import MoveGroupScreen, NewGroupScreen
++
++        entries = move_targets(self.workspace_state(), meta_from_session(session))
++
++        def done(choice: str | None) -> None:
++            if not choice:
++                return
++            if choice == "new_project":
++                self.push_screen(NewGroupScreen(), lambda name: self._finish_new_group(session, name))
++                return
++            if choice == "ungroup":
++                self._mutate(session, "ungroup")
++            elif choice.startswith("project:"):
++                self._mutate(session, "move", project_id=choice.split(":", 1)[1])
++            self.rebuild_nav()
++            self.load_session(self.current)
++
++        self.push_screen(MoveGroupScreen(entries), done)
++
++    def _finish_new_group(self, session: Session, name: str | None) -> None:
++        if not name:
++            return
++        self._mutate(session, "move", new_project_name=name)
++        self.rebuild_nav()
++        self.load_session(self.current)
++
++    def open_identity_editor(self, session: Session | None = None) -> None:
++        from local.tui.identity_ui import IdentityEditorScreen
++
++        session = session or self.current
++
++        def done(payload: dict | None) -> None:
++            if not payload:
++                return
++            self._mutate(
++                session,
++                "set_identity",
++                identity=payload["identity"],
++                share_user_profile=payload["share_user_profile"],
++            )
++            self.rebuild_nav()
++            self.load_session(self.current)
++            role = payload["identity"].role_title or "（未填职位）"
++            self.notify(f"已保存身份：{role}")
++
++        self.push_screen(
++            IdentityEditorScreen(session.identity, share_user_profile=session.share_user_profile),
++            done,
++        )
++
++    def confirm_delete_session(self, session: Session) -> None:
++        from local.tui.identity_ui import ConfirmScreen
++
++        probe, _ws = self._mutate(session, "delete", confirm=False)
++        if not probe.needs_confirm:
++            return
++
++        def done(confirmed: bool | None) -> None:
++            if not confirmed:
++                self._mutate(session, "delete_cancel")
++                return
++            deleted = session.id
++            self._mutate(session, "delete", confirm=True)
++            if not self.sessions:
++                emoji, accent = assign_avatar(self._avatar_seq)
++                self._avatar_seq += 1
++                blank = Session("新会话", avatar=emoji, accent=accent)
++                self.sessions = [blank]
++            if self.current.id == deleted or self.current not in self.sessions:
++                self.current = self.sessions[0]
++            self._sync_memory_host()
++            self.rebuild_nav()
++            self.load_session(self.current)
++            self.persist_workspace()
++
++        self.push_screen(ConfirmScreen(probe.message), done)
++
++    def action_edit_identity(self) -> None:
++        self.open_identity_editor(self.current)
+ 
+     async def action_new_session(self) -> None:
+         # 有激活项目则建在项目内，否则未分组

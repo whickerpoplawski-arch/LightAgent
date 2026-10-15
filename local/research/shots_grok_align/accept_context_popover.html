@@ -1,0 +1,31 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"/><style>
+*{box-sizing:border-box}body{margin:0;background:#ececf1;font-family:-apple-system,"Noto Sans CJK SC",sans-serif}
+.wrap{width:720px;margin:40px auto;background:#fafafa;border-radius:16px;padding:28px;min-height:280px;position:relative}
+.note{color:#8e8e93;font-size:13px;margin-bottom:18px}
+.stats{display:flex;justify-content:space-between;align-items:center;margin-top:120px;padding:10px 12px;background:#f5f5f7;border-radius:12px;color:#8e8e93;font-size:13px}
+.pill{display:inline-flex;align-items:center;gap:8px;padding:6px 12px;border-radius:999px;border:1.5px solid #93c5fd;color:#2563eb;font-weight:700;background:#fff}
+.dot{width:14px;height:14px;border-radius:50%;border:2px solid #93c5fd;display:inline-flex;align-items:center;justify-content:center}
+.dot i{width:7px;height:7px;border-radius:50%;background:#2563eb;display:block}
+.pop{position:absolute;right:40px;bottom:88px;width:320px;background:#fff;border:1.5px solid #c4b5fd;border-radius:14px;padding:14px 16px;box-shadow:0 8px 24px rgba(0,0,0,.06);color:#6b5b4f}
+.head{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin-bottom:10px}
+.head .t{font-weight:600}.head .p{color:#7c6bf0;font-weight:700}.head .u{color:#8b7e72;font-size:14px}
+.bar{height:14px;border-radius:4px;background:repeating-linear-gradient(90deg,#e8e4df 0 6px,#eeeae4 6px 12px);overflow:hidden;display:flex;margin-bottom:12px}
+.bar span{display:block;height:100%}
+.bar .a{width:2.2%;background:#c4a484}.bar .b{width:8.3%;background:#c4b5fd}.bar .c{width:8.9%;background:#93c5fd}
+.rows{font-size:14px;line-height:1.9}
+.rows div{display:flex;justify-content:space-between}
+.sq{display:inline-block;width:12px;height:12px;border-radius:2px;margin-right:8px;vertical-align:-1px}
+</style></head><body><div class="wrap">
+<div class="note">点击右下角上下文比率后弹出（与参考图同结构）</div>
+<div class="pop">
+  <div class="head"><span class="t">上下文已用</span><span class="p">10%</span><span class="u">~99.3K / 1M</span></div>
+  <div class="bar"><span class="a"></span><span class="b"></span><span class="c"></span></div>
+  <div class="rows">
+    <div><span><i class="sq" style="background:#c4a484"></i>系统提示词</span><span>~2.2K</span></div>
+    <div><span><i class="sq" style="background:#c4b5fd"></i>工具定义</span><span>~8.3K</span></div>
+    <div><span><i class="sq" style="background:#93c5fd"></i>对话消息</span><span>~88.8K</span></div>
+  </div>
+</div>
+<div class="stats"><span>⚡ 1 轮 · 2 步 · 今日用量 2/45</span>
+<span class="pill"><span class="dot"><i></i></span>10%</span></div>
+</div></body></html>

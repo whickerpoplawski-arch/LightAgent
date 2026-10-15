@@ -1,0 +1,32 @@
+[
+  {
+    "id": "blue_drop",
+    "file": "blue_drop.png",
+    "accent": "#3b82f6"
+  },
+  {
+    "id": "pink_cloud",
+    "file": "pink_cloud.png",
+    "accent": "#ec4899"
+  },
+  {
+    "id": "orange_cloud",
+    "file": "orange_cloud.png",
+    "accent": "#f97316"
+  },
+  {
+    "id": "black_star",
+    "file": "black_star.png",
+    "accent": "#1c1c1e"
+  },
+  {
+    "id": "brown_hex",
+    "file": "brown_hex.png",
+    "accent": "#a16207"
+  },
+  {
+    "id": "blue_tri",
+    "file": "blue_tri.png",
+    "accent": "#2563eb"
+  }
+]

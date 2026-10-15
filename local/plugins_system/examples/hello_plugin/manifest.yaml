@@ -1,0 +1,6 @@
+name: hello_plugin
+version: 0.1.0
+description: 最小演示插件：hello 工具 + hello skill（无网络、无依赖）
+entrypoints:
+  tools: tools.py
+  skills: skills

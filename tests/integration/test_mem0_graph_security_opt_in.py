@@ -133,9 +133,14 @@ def test_isolated_mem0_graph_rejects_cross_user_poisoning_at_framework_boundary(
             result_format="object",
             trace=True,
         )
-        prompt = completions.calls[0]["messages"][-1]["content"]
-        assert trusted_drug in prompt
-        assert poisoned_drug not in prompt
+        messages = completions.calls[0]["messages"]
+        system = messages[0]["content"]
+        user = messages[-1]["content"]
+        assert "<memory-context>" not in user
+        assert trusted_drug in system
+        assert trusted_drug not in user
+        assert poisoned_drug not in system
+        assert poisoned_drug not in user
         filtered = next(event for event in result.trace if event["type"] == "memory_retrieve_filter")
         assert filtered["data"]["allowed_count"] >= 1
         assert filtered["data"]["blocked_count"] >= 0

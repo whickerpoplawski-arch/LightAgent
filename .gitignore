@@ -4,3 +4,11 @@ __pycache__/
 LightAgent/__pycache__/__init__.cpython-311.pyc
 LightAgent/__pycache__/la_core.cpython-311.pyc
 dist/
+local/memory/store/*.sqlite
+local/memory/store/*.sqlite-*
+local/.openrouter_usage.json
+local/data/
+logs/
+*.pyc
+.gitignore.orig
+local/eval/reports/*.json

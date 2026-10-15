@@ -706,12 +706,26 @@ class ContextProjector:
         return trace
 
 
+def is_never_compact(message: dict[str, Any]) -> bool:
+    """True when a message is pinned and must survive compaction."""
+    metadata = message.get("metadata")
+    if not isinstance(metadata, dict):
+        return False
+    return str(metadata.get("compact", "")).lower() == "never"
+
+
+def _is_compacted_summary(message: dict[str, Any]) -> bool:
+    metadata = message.get("metadata")
+    return bool(isinstance(metadata, dict) and metadata.get("compacted") and message.get("role") == "system")
+
+
 @dataclass
 class CompactionResult:
     messages: list[dict[str, Any]]
     removed_count: int
     summary: str | None = None
     spilled: list[dict[str, Any]] = field(default_factory=list)
+    removed: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -737,34 +751,112 @@ class ContextBudget:
     def fits(self, messages: Iterable[dict[str, Any]]) -> bool:
         return self.estimate(messages) <= self.max_tokens - self.reserved_output_tokens
 
+    def usage_ratio(self, messages: Iterable[dict[str, Any]]) -> float:
+        """Share of the context window occupied by ``messages`` (0–1+)."""
+        return self.estimate(messages) / float(self.max_tokens)
+
 
 class ContextCompactor:
-    """Deterministic message trimming with optional summary generation."""
+    """Deterministic message trimming with optional summary generation.
+
+    Defaults keep the historical tail-window behavior. Life-assistant compact
+    passes ``keep_user_turns`` so the tail is counted in user turns, and sets
+    ``min_keep_tool_steps`` so the newest tool results stay inline.
+    Messages with ``metadata.compact == "never"`` are not removed.
+    """
 
     def __init__(
             self,
             summarizer: Callable[[list[dict[str, Any]]], str] | None = None,
             *,
             max_inline_tool_chars: int = 12000,
+            min_keep_tool_steps: int = 0,
+            defer_error_tool_results: bool = False,
     ):
         self.summarizer = summarizer
         self.max_inline_tool_chars = max_inline_tool_chars
+        self.min_keep_tool_steps = max(0, int(min_keep_tool_steps))
+        self.defer_error_tool_results = bool(defer_error_tool_results)
 
-    def compact(self, messages: Iterable[dict[str, Any]], *, max_messages: int = 20) -> CompactionResult:
+    def compact(
+            self,
+            messages: Iterable[dict[str, Any]],
+            *,
+            max_messages: int = 20,
+            keep_user_turns: int | None = None,
+    ) -> CompactionResult:
         values, spilled = self._spill_tool_results(messages)
+        if keep_user_turns is not None:
+            if keep_user_turns < 1:
+                raise ValueError("keep_user_turns must be at least 1")
+            return self._compact_user_turns(values, spilled, keep_user_turns)
         if max_messages < 2:
             raise ValueError("max_messages must be at least 2")
         if len(values) <= max_messages:
-            return CompactionResult(messages=values, removed_count=0, spilled=spilled)
+            return CompactionResult(messages=values, removed_count=0, spilled=spilled, removed=[])
 
         system = [message for message in values if message.get("role") == "system"][:1]
         non_system = [message for message in values if message.get("role") != "system"]
         keep_count = max_messages - len(system)
         kept = non_system[-keep_count:]
         removed = non_system[:-keep_count]
+        if any(is_never_compact(message) for message in removed):
+            pin_ids = {id(message) for message in removed if is_never_compact(message)}
+            kept_ids = {id(message) for message in kept} | pin_ids
+            kept = [message for message in non_system if id(message) in kept_ids]
+            removed = [message for message in non_system if id(message) not in kept_ids]
+        kept, removed = self._drop_orphan_tools(kept, removed)
+        return self._with_summary(system, kept, removed, spilled)
 
-        while kept and kept[0].get("role") == "tool":
+    def _compact_user_turns(
+            self,
+            values: list[dict[str, Any]],
+            spilled: list[dict[str, Any]],
+            keep_user_turns: int,
+    ) -> CompactionResult:
+        """Keep one head system plus the last K user turns and their pairs."""
+        head: dict[str, Any] | None = None
+        body: list[dict[str, Any]] = []
+        for message in values:
+            if head is None and message.get("role") == "system" and not _is_compacted_summary(message):
+                head = message
+                continue
+            body.append(message)
+        user_indexes = [index for index, message in enumerate(body) if message.get("role") == "user"]
+        if user_indexes:
+            start = user_indexes[-keep_user_turns] if len(user_indexes) > keep_user_turns else user_indexes[0]
+        else:
+            start = len(body)
+        window = set(range(start, len(body)))
+        compacted_indexes = [index for index, message in enumerate(body) if _is_compacted_summary(message)]
+        last_summary = compacted_indexes[-1] if compacted_indexes else None
+        kept: list[dict[str, Any]] = []
+        removed: list[dict[str, Any]] = []
+        for index, message in enumerate(body):
+            if index in window or is_never_compact(message) or index == last_summary:
+                kept.append(message)
+            else:
+                removed.append(message)
+        kept, removed = self._drop_orphan_tools(kept, removed)
+        system = [head] if head is not None else []
+        return self._with_summary(system, kept, removed, spilled)
+
+    def _drop_orphan_tools(
+            self,
+            kept: list[dict[str, Any]],
+            removed: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        while kept and kept[0].get("role") == "tool" and not is_never_compact(kept[0]):
             removed.append(kept.pop(0))
+        return kept, removed
+
+    def _with_summary(
+            self,
+            system: list[dict[str, Any]],
+            kept: list[dict[str, Any]],
+            removed: list[dict[str, Any]],
+            spilled: list[dict[str, Any]],
+    ) -> CompactionResult:
         summary = self.summarizer(deepcopy(removed)) if self.summarizer and removed else None
         if summary:
             summary_message = {
@@ -780,6 +872,7 @@ class ContextCompactor:
             removed_count=len(removed),
             summary=summary,
             spilled=spilled,
+            removed=removed,
         )
 
     def compact_to_budget(
@@ -803,12 +896,25 @@ class ContextCompactor:
             self,
             messages: Iterable[dict[str, Any]],
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        raw = [deepcopy(message) for message in messages]
+        tool_indexes = [index for index, message in enumerate(raw) if message.get("role") == "tool"]
+        protected = set(tool_indexes[-self.min_keep_tool_steps:]) if self.min_keep_tool_steps else set()
         prepared: list[dict[str, Any]] = []
         spilled: list[dict[str, Any]] = []
-        for message in messages:
-            value = deepcopy(message)
+        for index, value in enumerate(raw):
             content = value.get("content")
-            if value.get("role") == "tool" and isinstance(content, str) and len(content) > self.max_inline_tool_chars:
+            metadata = value.get("metadata") if isinstance(value.get("metadata"), dict) else {}
+            already_offloaded = bool(metadata.get("content_reference") or metadata.get("tool_result_offloaded"))
+            is_error = bool(metadata.get("is_error") or metadata.get("error"))
+            should_spill = (
+                value.get("role") == "tool"
+                and isinstance(content, str)
+                and len(content) > self.max_inline_tool_chars
+                and index not in protected
+                and not already_offloaded
+                and not (self.defer_error_tool_results and is_error)
+            )
+            if should_spill and isinstance(content, str):
                 digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
                 reference = f"tool-result:sha256:{digest}"
                 spilled.append({
@@ -818,7 +924,10 @@ class ContextCompactor:
                     "content": content,
                 })
                 value["content"] = f"[Tool result stored outside context: {reference}, {len(content)} chars]"
-                value.setdefault("metadata", {})["content_reference"] = reference
+                if not isinstance(value.get("metadata"), dict):
+                    value["metadata"] = {}
+                value["metadata"]["content_reference"] = reference
+                value["metadata"]["tool_result_offloaded"] = True
             prepared.append(value)
         return prepared, spilled
 
@@ -839,4 +948,5 @@ __all__ = [
     "CompactionResult",
     "ContextBudget",
     "ContextCompactor",
+    "is_never_compact",
 ]

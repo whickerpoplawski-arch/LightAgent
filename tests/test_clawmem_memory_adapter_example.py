@@ -169,9 +169,14 @@ def test_clawmem_adapter_works_with_lightagent_memory_policy():
 
     result = agent.run("Where should I travel next?", user_id="alice", result_format="object", trace=True)
 
-    prompt = completions.calls[0]["messages"][-1]["content"]
+    messages = completions.calls[0]["messages"]
+    system = messages[0]["content"]
+    user = messages[-1]["content"]
+    assert messages[-1]["role"] == "user"
+    assert "<memory-context>" not in user
     assert result.content == "done"
-    assert "Alice prefers quiet beach towns" in prompt
-    assert "Reflection draft should stay private" not in prompt
+    assert "Alice prefers quiet beach towns" in system
+    assert "Alice prefers quiet beach towns" not in user
+    assert "Reflection draft should stay private" not in system
     assert client.created_payloads[0]["user_id"] == "tenant:alice"
     assert client.created_payloads[0]["metadata"]["original_user_id"] == "alice"

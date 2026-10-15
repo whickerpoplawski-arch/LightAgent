@@ -1,0 +1,1401 @@
+--- /tmp/LightAgent/LightAgent/core.py	2026-10-12 09:42:20.538177095 +0000
++++ LightAgent/core.py	2026-10-12 09:50:06.281623615 +0000
+@@ -216,6 +216,10 @@
+         self.model = model
+         self.memory = memory
+         self.memory_policy = memory_policy or MemoryPolicy(namespace=memory_namespace)
++        # Filled by local.memory.attach_profile_memory. Applied only on the
++        # outbound completion, after the session trace snapshot.
++        self.ephemeral_context_provider = None
++        self._kernel_memory_snippet = ""
+         self.guardrails = GuardrailManager(
+             input_guardrails=input_guardrails,
+             tool_guardrails=tool_guardrails,
+@@ -726,7 +730,7 @@
+                 return stream_result
+             return self._format_run_result(hook_error, result_format, traceid, hook_error)
+         try:
+-            response = self.client.chat.completions.create(**self.chat_params)
++            response = self._dispatch_chat_completion(self.chat_params)
+         except Exception as e:
+             self._complete_model_request(error=e)
+             error_msg = format_lightagent_error(e, "create chat completion")
+@@ -1436,8 +1440,53 @@
+             else:
+                 yield StreamEvent(type="content", data=chunk, trace_id=trace_id)
+ 
++    def _dispatch_chat_completion(self, params: Dict[str, Any]):
++        """Send one completion with ephemeral blocks on a copy of the messages.
++
++        The session trace already snapshotted ``chat_params``. Persona, identity,
++        and memory packs are appended here so they reach the model and stay out
++        of the stored transcript. Tree-of-thought is not involved.
++        """
++        sent = deepcopy(params)
++        blocks: list[str] = []
++        provider = getattr(self, "ephemeral_context_provider", None)
++        if callable(provider):
++            messages = list(sent.get("messages") or [])
++            non_system = [item for item in messages if item.get("role") != "system"]
++            user_text = ""
++            prior = non_system
++            if non_system and non_system[-1].get("role") == "user":
++                user_text = str(non_system[-1].get("content") or "")
++                prior = non_system[:-1]
++            extra = provider(
++                query=user_text,
++                user_id=str(getattr(self, "_current_user_id", "") or ""),
++                history=prior,
++            )
++            if extra and str(extra).strip():
++                blocks.append(str(extra).strip())
++        snippet = str(getattr(self, "_kernel_memory_snippet", "") or "").strip()
++        if snippet:
++            if "<memory-context>" not in snippet:
++                snippet = f"<memory-context>\n{snippet}\n</memory-context>"
++            blocks.append(snippet)
++        if blocks:
++            addition = "\n\n".join(blocks)
++            messages = [dict(item) for item in (sent.get("messages") or [])]
++            if messages and messages[0].get("role") == "system":
++                messages[0]["content"] = f"{messages[0].get('content') or ''}\n\n{addition}".strip()
++            else:
++                messages.insert(0, {"role": "system", "content": addition})
++            sent["messages"] = messages
++        return self.client.chat.completions.create(**sent)
++
+     def _add_memory_context(self, query: str, user_id: str) -> str:
+-        """添加记忆上下文"""
++        """Retrieve kernel memory and store the raw user sentence.
++
++        The retrieved text is held for ``_dispatch_chat_completion``. It is not
++        concatenated onto the user message.
++        """
++        self._kernel_memory_snippet = ""
+         if self.memory is None:
+             return query
+ 
+@@ -1483,7 +1532,9 @@
+                 scope="agent",
+             )
+ 
+-        return f"{context}\n##用户提问：\n{query}" if context else query
++        if context.strip():
++            self._kernel_memory_snippet = context.strip()
++        return query
+ 
+     def _retrieve_memory_with_hooks(
+             self,
+@@ -2083,7 +2134,7 @@
+                 return hook_error
+ 
+             try:
+-                response = self.client.chat.completions.create(**self.chat_params)
++                response = self._dispatch_chat_completion(self.chat_params)
+             except Exception as e:
+                 self._complete_model_request(error=e)
+                 error_msg = format_lightagent_error(e, "continue chat completion")
+@@ -2433,7 +2484,7 @@
+                                 yield hook_error
+                                 return
+                             try:
+-                                response = self.client.chat.completions.create(**self.chat_params)
++                                response = self._dispatch_chat_completion(self.chat_params)
+                             except Exception as e:
+                                 self._complete_model_request(error=e)
+                                 error_msg = format_lightagent_error(e, "continue streaming chat completion")
+--- /tmp/overlay/local/memory/inject.py	2026-10-12 09:25:09.000000000 +0000
++++ local/memory/inject.py	2026-10-12 09:57:17.459068935 +0000
+@@ -69,6 +69,12 @@
+     return texts
+ 
+ 
++def compose_system(system: str, persona: str, identity_block: str, ephemeral: str) -> str:
++    """Order: base system, persona, identity, memory pack. All ephemeral."""
++    parts = [part.strip() for part in (system, persona, identity_block, ephemeral) if part and part.strip()]
++    return "\n\n".join(parts)
++
++
+ def prepare_turn(
+     *,
+     system: str,
+@@ -78,29 +84,40 @@
+     store: ProfileStore | None = None,
+     budget_tokens: int | None = None,
+     cache: PackCache | None = None,
++    persona_text: str | None = None,
++    identity_block: str | None = None,
++    share_user_profile: bool = True,
+ ) -> PreparedTurn:
+-    """Build the model request. ``user_text`` is appended unchanged."""
++    """Build the model request. ``user_text`` is appended unchanged.
++
++    ``persona_text=None`` loads the global persona files. A string replaces
++    them (override). ``identity_block`` is the per-bot role and is never
++    written to the profile store. ``share_user_profile=False`` skips the pack.
++    """
+     host = host or current_host()
+     store = store or get_store()
+     history = list(history or [])
+-    kwargs = {}
+-    if budget_tokens is not None:
+-        kwargs["budget_tokens"] = budget_tokens
+-    pack = build_for_turn(
+-        store,
+-        host,
+-        query=user_text,
+-        window_texts=_window_texts(history, user_text),
+-        cache=cache,
+-        **kwargs,
+-    )
+-    ephemeral = render_ephemeral(pack)
+-    system_content = system or ""
+-    persona = persona_system_block()
+-    if persona:
+-        system_content = f"{system_content}\n\n{persona}".strip()
+-    if ephemeral:
+-        system_content = f"{system_content}\n\n{ephemeral}".strip()
++    if share_user_profile:
++        kwargs = {}
++        if budget_tokens is not None:
++            kwargs["budget_tokens"] = budget_tokens
++        pack = build_for_turn(
++            store,
++            host,
++            query=user_text,
++            window_texts=_window_texts(history, user_text),
++            cache=cache,
++            **kwargs,
++        )
++        ephemeral = render_ephemeral(pack)
++    else:
++        pack = MemoryPack(markdown="", tokens=0)
++        ephemeral = ""
++    if persona_text is None:
++        persona = persona_system_block()
++    else:
++        persona = persona_system_block(persona_text) if str(persona_text).strip() else ""
++    system_content = compose_system(system or "", persona, identity_block or "", ephemeral)
+ 
+     messages: list[dict] = [{"role": "system", "content": system_content}]
+     for message in history:
+@@ -118,6 +135,8 @@
+         detail = "memory pack 注入 system/instruction，未写入 user 消息。"
+     else:
+         detail = "本轮没有可注入的画像。"
++    if (identity_block or "").strip():
++        detail = f"{detail} 身份块已注入 system，未写入用户画像。"
+     return PreparedTurn(
+         messages=messages,
+         user_text=user_text,
+@@ -136,6 +155,10 @@
+     agent_id: str | None = None,
+     space_id: str | None = None,
+     store: ProfileStore | None = None,
++    persona_text: str | None = None,
++    identity_block: str | None = None,
++    share_user_profile: bool = True,
++    context_getter=None,
+ ):
+     """Install a provider the LightAgent runtime calls before each model request.
+ 
+@@ -157,6 +180,7 @@
+ 
+     def provider(*, query: str, user_id: str, history: list) -> str:
+         del user_id  # host stamp wins over the run/model user id
++        extra = context_getter() if context_getter else {}
+         prepared = prepare_turn(
+             system="",
+             history=history,
+@@ -164,14 +188,12 @@
+             host=host,
+             store=profile_store,
+             cache=cache,
++            persona_text=extra.get("persona_text", persona_text),
++            identity_block=extra.get("identity_block", identity_block),
++            share_user_profile=extra.get("share_user_profile", share_user_profile),
+         )
+-        blocks = []
+-        persona = persona_system_block()
+-        if persona:
+-            blocks.append(persona)
+-        if prepared.ephemeral:
+-            blocks.append(prepared.ephemeral)
+-        return "\n\n".join(blocks)
++        # System lane only. prepare_turn already kept the user sentence intact.
++        return prepared.messages[0]["content"] if prepared.messages else ""
+ 
+     agent.ephemeral_context_provider = provider
+     agent._profile_memory_host = host
+--- /tmp/overlay/local/memory/persona.py	2026-10-12 09:25:09.000000000 +0000
++++ local/memory/persona.py	2026-10-12 09:49:51.057798620 +0000
+@@ -22,8 +22,13 @@
+     return "\n\n".join(parts)
+ 
+ 
+-def persona_system_block() -> str:
+-    text = load_persona_text()
++def persona_system_block(text: str | None = None) -> str:
++    """Wrap persona text. ``None`` reads the global SOUL and IDENTITY files."""
++    if text is None:
++        text = load_persona_text()
++    text = (text or "").strip()
+     if not text:
+         return ""
++    if text.startswith("<persona>") and text.endswith("</persona>"):
++        return text
+     return f"<persona>\n{text}\n</persona>"
+\ No newline at end of file
+--- /tmp/overlay/local/openrouter_config.py	2026-10-12 09:32:33.000000000 +0000
++++ local/openrouter_config.py	2026-10-12 09:50:20.909488270 +0000
+@@ -50,7 +50,15 @@
+     return u
+ 
+ 
++# Incremented only when a real quota check runs. Tests keep this at 0.
++NETWORK_CALLS = 0
++
++
+ def _check_and_count():
++    global NETWORK_CALLS
++    NETWORK_CALLS += 1
++    if os.environ.get("LIGHTAGENT_FORBID_OPENROUTER") == "1":
++        raise RuntimeError("OpenRouter blocked by LIGHTAGENT_FORBID_OPENROUTER")
+     u = _load_usage()
+     now = time.time()
+     u["recent"] = [t for t in u["recent"] if now - t < 60]
+@@ -72,9 +80,29 @@
+     from LightAgent import LightAgent
+     from local.memory.inject import attach_profile_memory
+ 
++    persona_text = kwargs.pop("persona_text", None)
++    identity_block = kwargs.pop("identity_block", None)
++    share_user_profile = kwargs.pop("share_user_profile", True)
++    session_id = kwargs.pop("session_id", None)
++    agent_id = kwargs.pop("agent_id", None)
++    space_id = kwargs.pop("space_id", None)
++    # Collaboration must not turn tree-of-thought on by default.
++    kwargs.setdefault("tree_of_thought", False)
++    if os.environ.get("LIGHTAGENT_FORBID_OPENROUTER") == "1":
++        raise RuntimeError("OpenRouter blocked by LIGHTAGENT_FORBID_OPENROUTER")
++
+     agent = LightAgent(model=model, api_key=get_api_key(), base_url=OPENROUTER_BASE_URL, **kwargs)
+     # Profile pack is local. This does not call OpenRouter.
+-    attach_profile_memory(agent, user_id=os.environ.get("LIGHTAGENT_USER_ID", "local-user"))
++    attach_profile_memory(
++        agent,
++        user_id=os.environ.get("LIGHTAGENT_USER_ID", "local-user"),
++        session_id=session_id,
++        agent_id=agent_id,
++        space_id=space_id,
++        persona_text=persona_text,
++        identity_block=identity_block,
++        share_user_profile=share_user_profile,
++    )
+     return agent
+ 
+ 
+--- /tmp/overlay/local/tui/app.py	2026-10-12 09:32:33.000000000 +0000
++++ local/tui/app.py	2026-10-12 09:54:36.061857297 +0000
+@@ -10,6 +10,7 @@
+ import re
+ import time
+ from dataclasses import dataclass, field
++from pathlib import Path
+ 
+ from textual import on, work
+ from textual.app import App, ComposeResult
+@@ -17,6 +18,16 @@
+ from textual.containers import Horizontal, Vertical, VerticalScroll
+ from textual.widgets import Input, Label, ListItem, ListView, Markdown, Static, TabbedContent, TabPane
+ 
++from local.conversations.context_menu import (
++    Workspace,
++    apply_action,
++    menu_entries,
++    move_targets,
++    sidebar_sections,
++)
++from local.conversations.identity_inject import blocks_for_meta
++from local.conversations.models import BotIdentity, ConversationMeta, ProjectGroup
++from local.conversations.store import StoredWorkspace, Transcript, load_workspace, save_workspace
+ from local.memory.host import MemoryHost, bind_host
+ from local.memory.tui_panel import MemoryPanel
+ from local.tui.projects import Project, fmt_ago, touch
+@@ -60,6 +71,14 @@
+     id: str = field(default_factory=lambda: __import__("uuid").uuid4().hex[:8])
+     project_id: str | None = None
+     updated_at: float = field(default_factory=time.time)
++    created_at: float = field(default_factory=time.time)
++    pinned: bool = False
++    hidden: bool = False
++    unread: bool = False
++    identity: BotIdentity = field(default_factory=BotIdentity)
++    share_user_profile: bool = True
++    agent_id: str | None = None
++    space_id: str | None = None
+ 
+     def __post_init__(self) -> None:
+         if not self.avatar or not self.accent:
+@@ -68,6 +87,12 @@
+                 self.avatar = emoji
+             if not self.accent:
+                 self.accent = accent
++        if not isinstance(self.identity, BotIdentity):
++            self.identity = BotIdentity.from_dict(self.identity)
++        if not self.agent_id:
++            self.agent_id = f"bot-{self.id}"
++        if self.space_id is None:
++            self.space_id = self.project_id
+ 
+     @property
+     def preview(self) -> str:
+@@ -78,7 +103,9 @@
+ 
+ 
+ class SessionRow(Horizontal):
+-    """侧栏会话行（项目内缩进或未分组）。"""
++    """侧栏会话行。焦点在行上时 ``:`` 或 ``m`` 打开菜单，右键同样打开。"""
++
++    can_focus = True
+ 
+     def __init__(self, session: Session, *, nested: bool = False) -> None:
+         classes = "session-row nested" if nested else "session-row"
+@@ -86,11 +113,20 @@
+         self.session = session
+         self.nested = nested
+ 
++    def _title(self) -> str:
++        bits = []
++        if self.session.pinned:
++            bits.append("📌")
++        if self.session.unread:
++            bits.append("●")
++        prefix = (" ".join(bits) + " ") if bits else ""
++        return f"{prefix}{self.session.title}"
++
+     def compose(self) -> ComposeResult:
+         pad = "  " if self.nested else ""
+         yield Static(f"{pad}{self.session.avatar}", classes="s-avatar")
+         with Vertical(classes="s-meta"):
+-            yield Label(self.session.title, classes="s-title")
++            yield Label(self._title(), classes="s-title")
+             yield Label(
+                 f"{self.session.preview} · {fmt_ago(self.session.updated_at)}",
+                 classes="s-preview",
+@@ -101,20 +137,54 @@
+         app = self.app
+         if isinstance(app, LightAgentTUI) and app.current is self.session:
+             self.add_class("selected")
++        self._sync_flags()
++
++    def _sync_flags(self) -> None:
++        if self.session.unread:
++            self.add_class("unread")
++        else:
++            self.remove_class("unread")
++        if self.session.hidden:
++            self.add_class("is-hidden")
++        else:
++            self.remove_class("is-hidden")
+ 
+     def refresh_text(self) -> None:
+         pad = "  " if self.nested else ""
+         self.query_one(".s-avatar", Static).update(f"{pad}{self.session.avatar}")
+-        self.query_one(".s-title", Label).update(self.session.title)
++        self.query_one(".s-title", Label).update(self._title())
+         self.query_one(".s-preview", Label).update(
+             f"{self.session.preview} · {fmt_ago(self.session.updated_at)}"
+         )
++        self._sync_flags()
+ 
+     def on_click(self) -> None:
+         app = self.app
+         if isinstance(app, LightAgentTUI):
+             app.select_session(self.session)
+ 
++    def on_key(self, event) -> None:
++        app = self.app
++        if not isinstance(app, LightAgentTUI):
++            return
++        if event.key in ("colon", "m"):
++            app.open_session_menu(self.session)
++            event.stop()
++            event.prevent_default()
++        elif event.key == "delete":
++            app.confirm_delete_session(self.session)
++            event.stop()
++            event.prevent_default()
++
++    def on_mouse_down(self, event) -> None:
++        button = getattr(event, "button", 1)
++        value = getattr(button, "value", button)
++        if value == 3 or str(button).lower().endswith("right"):
++            app = self.app
++            if isinstance(app, LightAgentTUI):
++                app.open_session_menu(self.session)
++                event.stop()
++
+ 
+ class ProjectRow(Vertical):
+     """可展开项目：标题行 + 下属会话。"""
+@@ -327,6 +397,128 @@
+     return sessions, [p1, p2]
+ 
+ 
++def meta_from_session(session: Session) -> ConversationMeta:
++    identity = session.identity
++    return ConversationMeta(
++        id=session.id,
++        title=session.title,
++        avatar=session.avatar,
++        accent=session.accent,
++        project_id=session.project_id,
++        space_id=session.space_id,
++        pinned=session.pinned,
++        hidden=session.hidden,
++        unread=session.unread,
++        updated_at=session.updated_at,
++        created_at=session.created_at,
++        identity=BotIdentity(
++            display_name=identity.display_name,
++            role_title=identity.role_title,
++            job_description=identity.job_description,
++            template_id=identity.template_id,
++            persona_mode=identity.persona_mode,
++            persona_text=identity.persona_text,
++        ),
++        share_user_profile=session.share_user_profile,
++        agent_id=session.agent_id,
++    )
++
++
++def apply_meta_to_session(session: Session, meta: ConversationMeta) -> None:
++    session.title = meta.title
++    session.avatar = meta.avatar
++    session.accent = meta.accent
++    session.project_id = meta.project_id
++    session.space_id = meta.space_id
++    session.pinned = meta.pinned
++    session.hidden = meta.hidden
++    session.unread = meta.unread
++    session.updated_at = meta.updated_at
++    session.created_at = meta.created_at
++    session.identity = BotIdentity.from_dict(meta.identity.to_dict())
++    session.share_user_profile = meta.share_user_profile
++    session.agent_id = meta.agent_id
++
++
++def trace_to_dict(session: Session) -> dict:
++    return {
++        "steps": [
++            {
++                "kind": step.kind,
++                "summary": step.summary,
++                "detail": step.detail,
++                "status": step.status,
++                "tokens": step.tokens,
++                "duration_ms": step.duration_ms,
++                "lane": step.lane,
++                "tool_name": step.tool_name,
++                "tool_args": step.tool_args,
++                "tool_result": step.tool_result,
++            }
++            for step in session.trace.steps
++        ],
++        "stats": {
++            "rounds": session.trace.stats.rounds,
++            "steps": session.trace.stats.steps,
++            "tokens": session.trace.stats.tokens,
++            "tok_per_s": session.trace.stats.tok_per_s,
++            "cache_hit_pct": session.trace.stats.cache_hit_pct,
++        },
++    }
++
++
++def sessions_from_stored(stored: StoredWorkspace) -> tuple[list[Session], list[Project]]:
++    sessions: list[Session] = []
++    for meta in stored.conversations:
++        transcript = stored.transcripts.get(meta.id, Transcript())
++        session = Session(
++            title=meta.title,
++            messages=list(transcript.messages),
++            events=[(str(kind), str(text)) for kind, text in transcript.events],
++            avatar=meta.avatar,
++            accent=meta.accent,
++            id=meta.id,
++            project_id=meta.project_id,
++            updated_at=meta.updated_at,
++            created_at=meta.created_at,
++            pinned=meta.pinned,
++            hidden=meta.hidden,
++            unread=meta.unread,
++            identity=BotIdentity.from_dict(meta.identity.to_dict()),
++            share_user_profile=meta.share_user_profile,
++            agent_id=meta.agent_id,
++            space_id=meta.space_id,
++        )
++        blob = transcript.trace or {}
++        for item in blob.get("steps") or []:
++            session.trace.steps.append(
++                TraceStep(
++                    kind=str(item.get("kind") or "context"),
++                    summary=str(item.get("summary") or ""),
++                    detail=str(item.get("detail") or ""),
++                    status=str(item.get("status") or "ok"),
++                    tokens=int(item.get("tokens") or 0),
++                    duration_ms=int(item.get("duration_ms") or 0),
++                    lane=str(item.get("lane") or ""),
++                    tool_name=str(item.get("tool_name") or ""),
++                    tool_args=str(item.get("tool_args") or ""),
++                    tool_result=str(item.get("tool_result") or ""),
++                )
++            )
++        stats = blob.get("stats") or {}
++        session.trace.stats.rounds = int(stats.get("rounds") or 0)
++        session.trace.stats.steps = len(session.trace.steps)
++        session.trace.stats.tokens = int(stats.get("tokens") or 0)
++        session.trace.stats.tok_per_s = float(stats.get("tok_per_s") or 0)
++        session.trace.stats.cache_hit_pct = float(stats.get("cache_hit_pct") or 0)
++        sessions.append(session)
++    projects = [
++        Project(group.name, id=group.id, expanded=group.expanded, session_ids=list(group.session_ids))
++        for group in stored.projects
++    ]
++    return sessions, projects
++
++
+ class LightAgentTUI(App):
+     CSS_PATH = "app.tcss"
+     TITLE = "LightAgent"
+@@ -343,6 +535,7 @@
+         Binding("escape", "clear_trace_filters", "清除筛选"),
+         Binding("enter", "jump_trace_to_chat", "跳对话", show=False),
+         Binding("ctrl+comma", "open_settings", "设置", priority=True),
++        Binding("ctrl+shift+i", "edit_identity", "设定身份", priority=True),
+         Binding("ctrl+q", "quit", "退出"),
+     ]
+ 
+@@ -351,11 +544,28 @@
+         backend,
+         sessions: list[Session] | None = None,
+         projects: list[Project] | None = None,
++        *,
++        workspace_dir: str | Path | None = None,
++        persist: bool | None = None,
+     ) -> None:
+         super().__init__()
+         self.backend = backend
+-        if sessions is None and projects is None:
+-            sessions, projects = seed_demo_workspace()
++        self._workspace_dir = Path(workspace_dir) if workspace_dir else (
++            Path(__file__).resolve().parents[1] / "data" / "workspace"
++        )
++        self._show_hidden = False
++        self.collaboration_enabled = True
++        auto = sessions is None and projects is None
++        self._persist = auto if persist is None else persist
++        if auto:
++            loaded = load_workspace(self._workspace_dir) if self._persist else None
++            if loaded is None:
++                sessions, projects = seed_demo_workspace()
++            else:
++                sessions, projects = sessions_from_stored(loaded)
++                if not sessions:
++                    emoji, accent = assign_avatar(0)
++                    sessions = [Session("新会话", avatar=emoji, accent=accent)]
+         elif sessions is None:
+             emoji, accent = assign_avatar(0)
+             sessions = [Session("新会话", avatar=emoji, accent=accent)]
+@@ -383,11 +593,15 @@
+                     yield Static("+", id="new-btn")
+                 yield Input(placeholder="🔍  搜索项目/会话", id="search")
+                 with VerticalScroll(id="nav"):
++                    yield Label("置顶", id="pinned-section", classes="nav-section")
++                    yield Vertical(id="pinned-list")
+                     yield Label("项目", classes="nav-section")
+                     yield Static("+ 新项目", id="new-project-btn", classes="nav-action")
++                    yield Static("创建群聊（稍后）", id="group-chat-btn", classes="nav-disabled")
+                     yield Vertical(id="project-list")
+                     yield Label("会话", classes="nav-section")
+                     yield Vertical(id="ungrouped-list")
++                    yield Static("显示已隐藏", id="show-hidden-btn", classes="nav-action")
+                 with Horizontal(id="side-foot"):
+                     yield Static("P", id="profile-dot")
+                     yield Label("本地 · 免费额度", id="profile-label")
+@@ -433,19 +647,33 @@
+         self.theme = "textual-light"
+         self.query_one("#context-dock").display = False
+         self._sync_memory_host()
++        self._bind_collaboration()
+         self.rebuild_nav()
+         self.load_session(self.current)
+         self.update_stats()
+         self.query_one("#prompt").focus()
++        if self._persist:
++            self.persist_workspace()
+ 
+     def _sync_memory_host(self) -> None:
++        session = self.current
+         bind_host(MemoryHost(
+             user_id="local-user",
+             namespace="profile",
+-            session_id=self.current.id,
+-            agent_id="lightagent-tui",
++            session_id=session.id,
++            agent_id=session.agent_id,
++            space_id=session.space_id or session.project_id,
+         ))
+ 
++    def _bind_collaboration(self) -> None:
++        from local.conversations.collaborate import get_runtime
++
++        runtime = get_runtime()
++        runtime.enabled = self.collaboration_enabled
++        runtime.roster = [meta_from_session(item) for item in self.sessions]
++        runtime.mode = "mock" if self.backend.__class__.__name__ == "MockBackend" else "live"
++        runtime.depth = 0
++
+ 
+     # ---------- 侧栏：项目 / 会话 ----------
+     def sessions_in_project(self, project: Project) -> list[Session]:
+@@ -454,47 +682,140 @@
+ 
+     def ungrouped_sessions(self) -> list[Session]:
+         in_proj = set()
+-        for p in self.projects:
+-            in_proj.update(p.session_ids)
+-            for s in self.sessions:
+-                if s.project_id == p.id:
+-                    in_proj.add(s.id)
++        for project in self.projects:
++            in_proj.update(project.session_ids)
++            for session in self.sessions:
++                if session.project_id == project.id:
++                    in_proj.add(session.id)
+         return sorted(
+-            [s for s in self.sessions if s.id not in in_proj and s.project_id is None],
+-            key=lambda x: x.updated_at,
++            [
++                session
++                for session in self.sessions
++                if session.id not in in_proj and session.project_id is None and not session.hidden
++            ],
++            key=lambda item: item.updated_at,
+             reverse=True,
+         )
+ 
++    def workspace_state(self) -> Workspace:
++        return Workspace(
++            conversations=[meta_from_session(session) for session in self.sessions],
++            projects=[
++                ProjectGroup(
++                    name=project.name,
++                    id=project.id,
++                    expanded=project.expanded,
++                    session_ids=list(project.session_ids),
++                )
++                for project in self.projects
++            ],
++            show_hidden=self._show_hidden,
++            collaboration_enabled=self.collaboration_enabled,
++        )
++
++    def write_workspace(self, ws: Workspace) -> None:
++        by_id = {session.id: session for session in self.sessions}
++        kept: list[Session] = []
++        for meta in ws.conversations:
++            session = by_id.get(meta.id)
++            if session is None:
++                session = Session(meta.title, id=meta.id, avatar=meta.avatar, accent=meta.accent)
++            apply_meta_to_session(session, meta)
++            kept.append(session)
++        self.sessions = kept
++        if self.current.id not in {session.id for session in kept}:
++            self.current = kept[0] if kept else self.current
++        else:
++            self.current = next(session for session in kept if session.id == self.current.id)
++        old = {project.id: project for project in self.projects}
++        projects: list[Project] = []
++        for group in ws.projects:
++            project = old.get(group.id) or Project(group.name, id=group.id)
++            project.name = group.name
++            project.expanded = group.expanded
++            project.session_ids = list(group.session_ids)
++            projects.append(project)
++        self.projects = projects
++        self._bind_collaboration()
++
++    def persist_workspace(self) -> None:
++        if not self._persist:
++            return
++        ws = self.workspace_state()
++        stored = StoredWorkspace(
++            projects=ws.projects,
++            conversations=ws.conversations,
++            transcripts={
++                session.id: Transcript(
++                    messages=list(session.messages),
++                    events=[[kind, text] for kind, text in session.events],
++                    trace=trace_to_dict(session),
++                )
++                for session in self.sessions
++            },
++        )
++        save_workspace(self._workspace_dir, stored)
++
++    def _mutate(self, session: Session, action: str, **payload):
++        ws = self.workspace_state()
++        result = apply_action(ws, session.id, action, **payload)
++        if result.ok and not result.needs_confirm:
++            self.write_workspace(ws)
++            self.persist_workspace()
++        return result, ws
++
+     def rebuild_nav(self) -> None:
+-        pl = self.query_one("#project-list", Vertical)
+-        ul = self.query_one("#ungrouped-list", Vertical)
+-        pl.remove_children()
+-        ul.remove_children()
+-        q = self._nav_filter.strip().lower()
+-        for proj in self.projects:
+-            sess = self.sessions_in_project(proj)
+-            if q:
+-                name_hit = q in proj.name.lower()
+-                sess = [s for s in sess if name_hit or q in s.title.lower() or q in s.preview.lower()]
+-                if not name_hit and not sess:
++        pinned_box = self.query_one("#pinned-list", Vertical)
++        project_box = self.query_one("#project-list", Vertical)
++        ungrouped_box = self.query_one("#ungrouped-list", Vertical)
++        pinned_box.remove_children()
++        project_box.remove_children()
++        ungrouped_box.remove_children()
++        query = self._nav_filter.strip().lower()
++        sections = sidebar_sections(self.workspace_state())
++        by_id = {session.id: session for session in self.sessions}
++
++        def matches(session: Session) -> bool:
++            if not query:
++                return True
++            return query in session.title.lower() or query in session.preview.lower()
++
++        pinned = [by_id[meta.id] for meta in sections["pinned"] if meta.id in by_id and matches(by_id[meta.id])]
++        self.query_one("#pinned-section", Label).display = bool(pinned)
++        for session in pinned:
++            pinned_box.mount(SessionRow(session, nested=False))
++        for group in sections["projects"]:
++            project = next((item for item in self.projects if item.id == group["project"].id), None)
++            if project is None:
++                continue
++            members = [by_id[meta.id] for meta in group["sessions"] if meta.id in by_id]
++            if query:
++                name_hit = query in project.name.lower()
++                members = [session for session in members if name_hit or matches(session)]
++                if not name_hit and not members:
+                     continue
+-            pl.mount(ProjectRow(proj, sess))
+-        for s in self.ungrouped_sessions():
+-            if q and q not in s.title.lower() and q not in s.preview.lower():
++            project_box.mount(ProjectRow(project, members))
++        for meta in sections["ungrouped"]:
++            session = by_id.get(meta.id)
++            if session is None or not matches(session):
+                 continue
+-            ul.mount(SessionRow(s, nested=False))
+-        # 刷新选中态
++            ungrouped_box.mount(SessionRow(session, nested=False))
+         for row in self.query(SessionRow):
+             if row.session is self.current:
+                 row.add_class("selected")
+             else:
+                 row.remove_class("selected")
++        hidden_btn = self.query_one("#show-hidden-btn", Static)
++        hidden_btn.update("隐藏已隐藏项" if self._show_hidden else "显示已隐藏")
+ 
+     def select_session(self, session: Session) -> None:
+         self.current = session
++        if session.unread:
++            self._mutate(session, "mark_read")
++            session = self.current
+         self._sync_memory_host()
+         if session.project_id:
+-            self.active_project = next((p for p in self.projects if p.id == session.project_id), self.active_project)
++            self.active_project = next((project for project in self.projects if project.id == session.project_id), self.active_project)
+         self.load_session(session)
+         self.rebuild_nav()
+         self.query_one("#prompt").focus()
+@@ -517,6 +838,7 @@
+         self.projects.insert(0, proj)
+         self.active_project = proj
+         self.rebuild_nav()
++        self.persist_workspace()
+         return proj
+ 
+     def new_session_in_project(self, project: Project | None = None) -> Session:
+@@ -527,14 +849,17 @@
+         touch(s)
+         if project is not None:
+             s.project_id = project.id
++            s.space_id = project.id
+             project.session_ids.insert(0, s.id)
+             project.expanded = True
+             self.active_project = project
+         self.sessions.insert(0, s)
+         self.current = s
+         self._sync_memory_host()
++        self._bind_collaboration()
+         self.rebuild_nav()
+         self.load_session(s)
++        self.persist_workspace()
+         self.query_one("#prompt").focus()
+         return s
+ 
+@@ -707,7 +1032,11 @@
+         chat.scroll_end(animate=False)
+         av = self.query_one("#h-avatar", Static)
+         av.update(s.avatar)
+-        self.query_one("#h-title", Label).update(f"[b]{s.title}[/]")
++        role = (s.identity.role_title or "").strip()
++        title = f"[b]{s.title}[/]"
++        if role:
++            title += f"  [#2563eb]{role}[/]"
++        self.query_one("#h-title", Label).update(title)
+         self.query_one("#h-model", Label).update(f"模型 · {self.backend.name}")
+         self.refresh_trace(s)
+         self.update_stats()
+@@ -871,7 +1200,7 @@
+                 f"{'⠋⠙⠹⠸⠼⠴⠦⠧'[i % 8]}  LightAgent 思考中…  {rate:.0f} tok/s",
+             )
+         try:
+-            reply = self.backend.chat(history, text)
++            reply = self.backend.chat(history, text, turn=self.turn_context(s))
+         except Exception as e:  # 包括本地额度保护抛出的错误
+             self.call_from_thread(self.finish, s, text, None, str(e))
+             return
+@@ -919,6 +1248,7 @@
+         self.refresh_trace(s)
+         self.update_stats()
+         self.rebuild_nav()
++        self.persist_workspace()
+ 
+     @on(Input.Changed, "#search")
+     def filter_sessions(self, event: Input.Changed) -> None:
+@@ -942,6 +1272,169 @@
+             self.action_toggle_context()
+         elif wid == "tm-calls":
+             self.toggle_kind_filter("tool")
++        elif wid == "show-hidden-btn":
++            self._show_hidden = not self._show_hidden
++            self.rebuild_nav()
++        elif wid == "group-chat-btn":
++            self.notify("群聊还没做。先用 @身份 或 delegate_to_bot 请另一个 Bot 帮忙。")
++
++    def turn_context(self, session: Session):
++        from local.tui.backend import TurnContext
++
++        self._bind_collaboration()
++        meta = meta_from_session(session)
++        persona_text, identity_block = blocks_for_meta(meta)
++        from local.conversations.collaborate import get_runtime
++
++        runtime = get_runtime()
++        return TurnContext(
++            identity_block=identity_block,
++            persona_text=persona_text,
++            share_user_profile=session.share_user_profile,
++            session_id=session.id,
++            agent_id=session.agent_id,
++            space_id=session.space_id or session.project_id,
++            collaboration_enabled=self.collaboration_enabled,
++            roster=list(runtime.roster),
++            quota=runtime.quota,
++        )
++
++    def open_session_menu(self, session: Session) -> None:
++        from local.tui.identity_ui import ConversationMenuScreen
++
++        entries = menu_entries(meta_from_session(session))
++        self.push_screen(ConversationMenuScreen(session.title, entries), lambda action: self._on_menu(session, action))
++
++    def _on_menu(self, session: Session, action: str | None) -> None:
++        if not action:
++            return
++        if action == "rename":
++            self._rename_session(session)
++            return
++        if action == "move":
++            self._move_session(session)
++            return
++        if action == "set_identity":
++            self.open_identity_editor(session)
++            return
++        if action == "delete":
++            self.confirm_delete_session(session)
++            return
++        if action == "copy_id":
++            result, _ws = self._mutate(session, "copy_id")
++            copied = result.copied_id or session.id
++            try:
++                self.copy_to_clipboard(copied)
++            except Exception:
++                pass
++            self.notify(f"对话 ID：{copied}")
++            return
++        result, _ws = self._mutate(session, action)
++        if not result.ok:
++            self.notify(result.message)
++            return
++        self.rebuild_nav()
++        if session.id == self.current.id:
++            self.load_session(self.current)
++
++    def _rename_session(self, session: Session) -> None:
++        from local.tui.identity_ui import RenameScreen
++
++        def done(title: str | None) -> None:
++            if not title:
++                return
++            previous = session.id
++            result, _ws = self._mutate(session, "rename", title=title)
++            if not result.ok:
++                self.notify(result.message)
++                return
++            if self.current.id != previous:
++                self.notify("重命名不应改变 id")
++            self.rebuild_nav()
++            self.load_session(self.current)
++
++        self.push_screen(RenameScreen(session.title), done)
++
++    def _move_session(self, session: Session) -> None:
++        from local.tui.identity_ui import MoveGroupScreen, NewGroupScreen
++
++        entries = move_targets(self.workspace_state(), meta_from_session(session))
++
++        def done(choice: str | None) -> None:
++            if not choice:
++                return
++            if choice == "new_project":
++                self.push_screen(NewGroupScreen(), lambda name: self._finish_new_group(session, name))
++                return
++            if choice == "ungroup":
++                self._mutate(session, "ungroup")
++            elif choice.startswith("project:"):
++                self._mutate(session, "move", project_id=choice.split(":", 1)[1])
++            self.rebuild_nav()
++            self.load_session(self.current)
++
++        self.push_screen(MoveGroupScreen(entries), done)
++
++    def _finish_new_group(self, session: Session, name: str | None) -> None:
++        if not name:
++            return
++        self._mutate(session, "move", new_project_name=name)
++        self.rebuild_nav()
++        self.load_session(self.current)
++
++    def open_identity_editor(self, session: Session | None = None) -> None:
++        from local.tui.identity_ui import IdentityEditorScreen
++
++        session = session or self.current
++
++        def done(payload: dict | None) -> None:
++            if not payload:
++                return
++            self._mutate(
++                session,
++                "set_identity",
++                identity=payload["identity"],
++                share_user_profile=payload["share_user_profile"],
++            )
++            self.rebuild_nav()
++            self.load_session(self.current)
++            role = payload["identity"].role_title or "（未填职位）"
++            self.notify(f"已保存身份：{role}")
++
++        self.push_screen(
++            IdentityEditorScreen(session.identity, share_user_profile=session.share_user_profile),
++            done,
++        )
++
++    def confirm_delete_session(self, session: Session) -> None:
++        from local.tui.identity_ui import ConfirmScreen
++
++        probe, _ws = self._mutate(session, "delete", confirm=False)
++        if not probe.needs_confirm:
++            return
++
++        def done(confirmed: bool | None) -> None:
++            if not confirmed:
++                self._mutate(session, "delete_cancel")
++                return
++            deleted = session.id
++            self._mutate(session, "delete", confirm=True)
++            if not self.sessions:
++                emoji, accent = assign_avatar(self._avatar_seq)
++                self._avatar_seq += 1
++                blank = Session("新会话", avatar=emoji, accent=accent)
++                self.sessions = [blank]
++            if self.current.id == deleted or self.current not in self.sessions:
++                self.current = self.sessions[0]
++            self._sync_memory_host()
++            self.rebuild_nav()
++            self.load_session(self.current)
++            self.persist_workspace()
++
++        self.push_screen(ConfirmScreen(probe.message), done)
++
++    def action_edit_identity(self) -> None:
++        self.open_identity_editor(self.current)
+ 
+     async def action_new_session(self) -> None:
+         # 有激活项目则建在项目内，否则未分组
+--- /tmp/overlay/local/tui/app.tcss	2026-10-12 09:32:33.000000000 +0000
++++ local/tui/app.tcss	2026-10-12 09:57:17.419068608 +0000
+@@ -114,6 +114,35 @@
+ .session-row .s-meta { width: 1fr; height: 5; padding: 1 0 0 0; content-align: left middle; }
+ .session-row .s-title { text-style: bold; height: 1; }
+ .session-row .s-preview { color: #8e8e93; height: 1; }
++.session-row.unread .s-title { text-style: bold; color: #1d4ed8; }
++.session-row.is-hidden { color: #8e8e93; }
++.nav-disabled {
++    height: 3;
++    margin: 0 1 1 1;
++    padding: 0 1;
++    color: #a1a1aa;
++    border: round #e5e5ea;
++    background: transparent;
++    content-align: left middle;
++}
++
++#menu-dialog, #identity-dialog {
++    width: 72;
++    height: auto;
++    max-height: 90%;
++    padding: 1 2;
++    background: #ffffff;
++    border: round #d4d4d8;
++    margin: 1 2;
++}
++#identity-dialog { height: 90%; }
++#identity-form { height: 1fr; }
++#menu-title { text-style: bold; height: 1; }
++#menu-hint { color: #8e8e93; height: auto; margin: 0 0 1 0; }
++#menu-buttons { height: 3; margin-top: 1; }
++#menu-buttons Button { margin-right: 1; }
++#identity-job, #identity-persona { height: 5; margin-bottom: 1; }
++#identity-role, #identity-display, #identity-template, #identity-persona-mode { margin-bottom: 1; }
+ 
+ #side-foot {
+     height: 3;
+--- /tmp/overlay/local/tui/backend.py	2026-10-12 09:32:33.000000000 +0000
++++ local/tui/backend.py	2026-10-12 09:51:44.957179719 +0000
+@@ -42,6 +42,21 @@
+     cache_hit_pct: float = 0.0
+ 
+ 
++@dataclass
++class TurnContext:
++    """Per-turn identity and collaboration. The user sentence stays in ``prompt``."""
++
++    identity_block: str = ""
++    persona_text: str | None = None
++    share_user_profile: bool = True
++    session_id: str | None = None
++    agent_id: str | None = None
++    space_id: str | None = None
++    collaboration_enabled: bool = True
++    roster: list = field(default_factory=list)
++    quota: object | None = None
++
++
+ def _fmt_call(call: dict) -> str:
+     args = call.get("arguments") or ""
+     try:
+@@ -56,8 +71,9 @@
+ 
+     name = "mock-echo:free"
+ 
+-    def __init__(self) -> None:
++    def __init__(self, *, delay: float = 0.55) -> None:
+         self._mock_used = 0  # 仅展示用，不碰 OpenRouter 计数
++        self._delay = delay
+         self.plugin_tool_names: list[str] = []
+         self.reload_plugins()
+ 
+@@ -80,18 +96,37 @@
+     def usage(self) -> int:
+         return self._mock_used
+ 
+-    def chat(self, history: list[dict], prompt: str) -> Reply:
++    def chat(self, history: list[dict], prompt: str, turn: TurnContext | None = None) -> Reply:
+         # 模拟“流式思考”耗时，方便 UI 刷 tok/s
+-        time.sleep(0.55)
++        if self._delay:
++            time.sleep(self._delay)
+         self._mock_used += 1
+         t0 = 420 + random.randint(0, 180)
+         steps: list[TraceStep] = []
+         calls: list[str] = []
++        turn = turn or TurnContext()
+ 
+         # 上下文快照。mock 不发请求，但按正式路径组装 ephemeral pack，且不改用户原话。
++        from local.memory.host import MemoryHost
+         from local.memory.inject import prepare_turn
+ 
+-        prepared = prepare_turn(system="LightAgent 中文助手", history=history, user_text=prompt)
++        prepared = prepare_turn(
++            system="LightAgent 中文助手",
++            history=history,
++            user_text=prompt,
++            host=MemoryHost(
++                user_id="local-user",
++                session_id=turn.session_id,
++                agent_id=turn.agent_id,
++                space_id=turn.space_id,
++            ),
++            persona_text=turn.persona_text,
++            identity_block=turn.identity_block,
++            share_user_profile=turn.share_user_profile,
++        )
++        if prepared.user_text != prompt:
++            raise RuntimeError("identity injection changed the user message")
++        delegate_steps, delegate_content = self._maybe_delegate(prompt, turn, prepared.ephemeral)
+         steps.append(
+             TraceStep(
+                 kind="context",
+@@ -102,6 +137,28 @@
+                 lane="other",
+             )
+         )
++        if delegate_content is not None:
++            steps.extend(delegate_steps)
++            steps.append(
++                TraceStep(
++                    kind="assistant",
++                    summary=delegate_content.replace("\n", " ")[:48],
++                    detail=delegate_content,
++                    tokens=48,
++                    duration_ms=40,
++                    lane="model",
++                )
++            )
++            return Reply(
++                model=self.name,
++                content=delegate_content,
++                tool_calls=["delegate_to_bot"] if any(step.kind == "delegate" for step in delegate_steps) else [],
++                steps=steps,
++                tokens_in=80,
++                tokens_out=48,
++                duration_ms=max(t0, 200),
++                cache_hit_pct=0.0,
++            )
+ 
+         if "天气" in prompt:
+             # 模型思考
+@@ -242,6 +299,59 @@
+             cache_hit_pct=round(cache, 1),
+         )
+ 
++    def _maybe_delegate(self, prompt: str, turn: TurnContext, ephemeral: str, *, mode: str = "mock"):
++        """Resolve ``@角色``. Disabled collaboration leaves the sentence as text."""
++        from local.conversations.collaborate import DelegateError, plan_mention, run_delegation
++
++        plan = plan_mention(prompt, list(turn.roster or []), enabled=turn.collaboration_enabled)
++        if plan.notice and not plan.should_call:
++            return [
++                TraceStep(
++                    kind="context",
++                    summary=plan.notice,
++                    detail=prompt,
++                    lane="other",
++                )
++            ], f"（mock）你说的是：`{prompt}`\n\n{plan.notice}"
++        if not plan.should_call or plan.target is None:
++            return [], None
++        parent_messages: list[dict] = []
++        try:
++            outcome = run_delegation(
++                roster=list(turn.roster),
++                bot_id=plan.target.id,
++                task=plan.task,
++                context_summary="",
++                quota=turn.quota,
++                profile_block=ephemeral if turn.share_user_profile else "",
++                parent_messages=parent_messages,
++                mode=mode,
++            )
++        except DelegateError as exc:
++            return [
++                TraceStep(
++                    kind="error",
++                    summary=str(exc)[:80],
++                    detail=str(exc),
++                    status="error",
++                    lane="other",
++                )
++            ], f"派发失败：{exc}"
++        for message in parent_messages:
++            blob = str(message.get("content") or "")
++            if "<memory-context>" in blob or "<identity>" in blob:
++                raise RuntimeError("delegate wrote pack or identity into the parent transcript")
++        step = TraceStep(
++            kind="delegate",
++            summary=f"派发 · {plan.target.identity.role_title or plan.target.title}",
++            detail=outcome.result,
++            tool_name="delegate_to_bot",
++            tool_args=plan.task,
++            tool_result=outcome.parent_tool_result,
++            lane="other",
++        )
++        return [step], f"（mock）{outcome.result}"
++
+ 
+ class OpenRouterBackend:
+     """只用 :free 模型；每次调用前经过 openrouter_config 的本地计数（每日上限 45）。"""
+@@ -257,7 +367,21 @@
+     def usage(self) -> int:
+         return orc.usage_today()
+ 
+-    def chat(self, history: list[dict], prompt: str) -> Reply:
++    def chat(self, history: list[dict], prompt: str, turn: TurnContext | None = None) -> Reply:
++        import os
++
++        turn = turn or TurnContext()
++        child_mode = "live" if os.environ.get("LIGHTAGENT_ALLOW_OPENROUTER") == "1" else "mock"
++        delegate_steps, delegate_content = self._maybe_delegate(prompt, turn, "", mode=child_mode)
++        if delegate_content and delegate_content.startswith("派发失败"):
++            return Reply(
++                model=self.name,
++                content=delegate_content,
++                steps=delegate_steps,
++            )
++        run_history = list(history)
++        if delegate_content:
++            run_history.append({"role": "assistant", "content": delegate_content})
+         last = None
+         t_start = time.time()
+         for model in orc.FREE_MODELS:
+@@ -265,11 +389,27 @@
+             orc._check_and_count()  # 超过本地上限会直接抛错，不发请求
+             try:
+                 self._tools = _merged_tools()  # 每次对话热加载插件工具
+-                agent = orc.make_agent(model=model, instructions=self.instructions)
++                # Drop the delegate tool when this call is itself a child (depth >= 1).
++                from local.conversations.collaborate import child_delegate_tools_allowed, get_runtime
++
++                tools = self._tools
++                if not child_delegate_tools_allowed(get_runtime().depth):
++                    tools = [tool for tool in tools if getattr(tool, "__name__", "") != "delegate_to_bot"]
++                agent = orc.make_agent(
++                    model=model,
++                    instructions=self.instructions,
++                    tree_of_thought=False,
++                    persona_text=turn.persona_text,
++                    identity_block=turn.identity_block,
++                    share_user_profile=turn.share_user_profile,
++                    session_id=turn.session_id,
++                    agent_id=turn.agent_id,
++                    space_id=turn.space_id,
++                )
+                 res = agent.run(
+                     prompt,
+-                    tools=self._tools,
+-                    history=list(history),
++                    tools=tools,
++                    history=run_history,
+                     result_format="object",
+                     user_id="local-user",
+                 )
+@@ -288,7 +428,8 @@
+                         summary=f"会话上下文 · 历史 {len(history)} 条",
+                         tokens=0,
+                         lane="other",
+-                    )
++                    ),
++                    *delegate_steps,
+                 ]
+                 if calls_raw:
+                     steps.append(
+--- /tmp/overlay/local/tui/tools.py	2026-10-12 09:32:33.000000000 +0000
++++ local/tui/tools.py	2026-10-12 09:50:20.969487772 +0000
+@@ -3,6 +3,7 @@
+ 内置一等联网工具见 local.tools.web（web_search / web_fetch），不是插件。
+ """
+ 
++from local.conversations.collaborate import delegate_to_bot
+ from local.memory.tools import MEMORY_TOOLS
+ from local.tools.web import web_fetch, web_search
+ 
+@@ -20,4 +21,4 @@
+     ],
+ }
+ 
+-TOOLS = [get_weather, web_search, web_fetch, *MEMORY_TOOLS]
++TOOLS = [get_weather, web_search, web_fetch, delegate_to_bot, *MEMORY_TOOLS]
+--- /tmp/overlay/local/tui/trace.py	2026-10-12 04:45:19.000000000 +0000
++++ local/tui/trace.py	2026-10-12 09:50:21.337484764 +0000
+@@ -12,6 +12,7 @@
+     "context": "#16a34a",    # 绿
+     "model": "#7c3aed",
+     "error": "#dc2626",
++    "delegate": "#0f766e",
+ }
+ 
+ KIND_LABEL = {
+@@ -21,6 +22,7 @@
+     "context": "上下文",
+     "model": "模型",
+     "error": "错误",
++    "delegate": "派发",
+ }
+ 
+ # 时间线泳道
+@@ -56,6 +58,7 @@
+                 "tool": "tool",
+                 "context": "other",
+                 "error": "other",
++                "delegate": "other",
+             }.get(self.kind, "other")
+ 
+     @property
+--- /tmp/overlay/local/tui/README.md	2026-10-12 07:56:27.000000000 +0000
++++ local/tui/README.md	2026-10-12 09:59:01.147558384 +0000
+@@ -45,6 +45,9 @@
+ | Ctrl+K | 搜索会话 |
+ | Ctrl+L | 清空当前会话（含轨迹） |
+ | Ctrl+, | 打开设置（插件） |
++| Ctrl+Shift+I | 设定当前 Bot 的身份（职位和职责，模板只是可选起稿） |
++| `:` 或 `m` | 焦点在侧栏会话行上时，打开同一套会话菜单 |
++| Delete | 焦点在会话行上时，确认删除 |
+ | Ctrl+Q | 退出 |
+ 
+ 侧栏「+」按钮也可新建会话。
+@@ -52,7 +55,7 @@
+ ## UI 要点
+ 
+ - **设置 / 插件**：左下角 ⚙（或 Ctrl+,）打开设置层；左侧导航「插件」为首项；上方搜索/安装框支持本地路径、`owner/repo`、GitHub URL（git clone）；列表行标题 + 开关，写入 `local/plugins/enabled.json`，下次对话热加载工具（0 marketplace）
+- **侧栏**：「项目」（可展开文件夹 +「+ 新项目」/ 行内 + 新建会话）与「会话」（未分组，按最后活动时间降序）；Ctrl+P 新项目，Ctrl+N 在当前项目或未分组新建会话
++- **侧栏**：「项目」（可展开文件夹 +「+ 新项目」/ 行内 + 新建会话）与「会话」（未分组，按最后活动时间降序）；置顶区在最上面；「显示已隐藏」恢复被收起的对话。Ctrl+P 新项目，Ctrl+N 在当前项目或未分组新建会话。焦点在会话行上按 `:` 或 `m`（或右键）打开菜单：置顶、移至分组、未读、重命名、设定身份、复制 ID、隐藏、删除。身份由用户填写职位和职责，模板只是可选起稿。详见 `local/conversations/README.md`。
+ - **对话页**：用户蓝圆角气泡右对齐；Agent 灰圆角气泡左对齐；工具调用灰色斜体小胶囊
+ - **轨迹页**：
+   - 顶栏：时长 / 轮次 / 调用数 + 轨迹搜索
+--- /tmp/LightAgent/README.zh-CN.md	2026-10-12 09:42:20.542177258 +0000
++++ README.zh-CN.md	2026-10-12 09:58:55.295559289 +0000
+@@ -36,6 +36,7 @@
+   <h1>LightAgent🚀 超轻量、可“成长”的智能体框架，现已原生支持Skill</h1>
+ </div>
+ 
++本分叉在 `local/` 加了多对话身份：侧栏多个 Bot、每个对话一份你自己写的职位/职责、以及单层 `delegate_to_bot`。说明见 [`local/conversations/README.md`](local/conversations/README.md)。
+ 
+ 🚀 **LightAgent** 
+ 不再只是“聊天”，而是真正的“完成任务”。LightAgent 把记忆（`mem0`）、工具（`Tools`）、思维树（`ToT`）和多智能体协作融合进一个极简的包中，而你只需 **一行代码** 就能构建一个**能自我学习、按需加载Skill**的智能体 —— 就像给大模型装上“招式库”与“执行大脑”。
+--- /tmp/LightAgent/.gitignore	2026-10-12 09:42:20.538177095 +0000
++++ .gitignore	2026-10-12 09:59:37.847575503 +0000
+@@ -4,3 +4,6 @@
+ LightAgent/__pycache__/__init__.cpython-311.pyc
+ LightAgent/__pycache__/la_core.cpython-311.pyc
+ dist/
++local/data/
++local/.openrouter_usage.json
++logs/

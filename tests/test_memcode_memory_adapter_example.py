@@ -214,14 +214,20 @@ def test_build_agent_memory_roundtrip_preserves_identity_scope_and_hooks(agent_n
 
     result = agent.run("What does Alice prefer?", user_id="alice", result_format="object", trace=True)
     assert result.error is None
-    prompt = completions.calls[-1]["messages"][-1]["content"]
-    assert "Alice prefers quiet beach towns" in prompt
+    messages = completions.calls[-1]["messages"]
+    system = messages[0]["content"]
+    user = messages[-1]["content"]
+    assert "<memory-context>" not in user
+    assert "Alice prefers quiet beach towns" in system
+    assert "Alice prefers quiet beach towns" not in user
     filtered = next(event for event in result.trace if event["type"] == "memory_retrieve_filter")
     assert filtered["data"]["allowed_count"] >= 1
 
     bob = agent.run("What do I prefer?", user_id="bob", result_format="object", trace=True)
     assert bob.error is None
-    assert "Alice prefers quiet beach towns" not in completions.calls[-1]["messages"][-1]["content"]
+    bob_messages = completions.calls[-1]["messages"]
+    bob_blob = "\n".join(str(item.get("content") or "") for item in bob_messages)
+    assert "Alice prefers quiet beach towns" not in bob_blob
     assert client.search_calls[-1]["context_space_id"] == "space-bob"
     assert client.ingest_calls[-1]["metadata"]["user_id"] == "demo:bob"
     assert phases == ["before_memory_retrieve", "after_memory_retrieve"] * 3

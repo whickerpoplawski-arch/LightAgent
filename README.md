@@ -1,4 +1,6 @@
 
+> 本工作区在 LightAgent 上加了个人生活助手的 P0 用户画像。记忆包只注入当次请求的 system 侧，不写回用户消息。用法和测试见 `local/memory/README.md`。`python -m pytest local/memory/tests -q` 不调用 OpenRouter。
+
 ![LightAgent Banner](docs/images/lightagent-banner.jpg)
 <div align="center">
   <p>

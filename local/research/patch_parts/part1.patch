@@ -1,0 +1,297 @@
+--- /tmp/LightAgent/LightAgent/core.py	2026-10-12 09:42:20.538177095 +0000
++++ LightAgent/core.py	2026-10-12 09:50:06.281623615 +0000
+@@ -216,6 +216,10 @@
+         self.model = model
+         self.memory = memory
+         self.memory_policy = memory_policy or MemoryPolicy(namespace=memory_namespace)
++        # Filled by local.memory.attach_profile_memory. Applied only on the
++        # outbound completion, after the session trace snapshot.
++        self.ephemeral_context_provider = None
++        self._kernel_memory_snippet = ""
+         self.guardrails = GuardrailManager(
+             input_guardrails=input_guardrails,
+             tool_guardrails=tool_guardrails,
+@@ -726,7 +730,7 @@
+                 return stream_result
+             return self._format_run_result(hook_error, result_format, traceid, hook_error)
+         try:
+-            response = self.client.chat.completions.create(**self.chat_params)
++            response = self._dispatch_chat_completion(self.chat_params)
+         except Exception as e:
+             self._complete_model_request(error=e)
+             error_msg = format_lightagent_error(e, "create chat completion")
+@@ -1436,8 +1440,53 @@
+             else:
+                 yield StreamEvent(type="content", data=chunk, trace_id=trace_id)
+ 
++    def _dispatch_chat_completion(self, params: Dict[str, Any]):
++        """Send one completion with ephemeral blocks on a copy of the messages.
++
++        The session trace already snapshotted ``chat_params``. Persona, identity,
++        and memory packs are appended here so they reach the model and stay out
++        of the stored transcript. Tree-of-thought is not involved.
++        """
++        sent = deepcopy(params)
++        blocks: list[str] = []
++        provider = getattr(self, "ephemeral_context_provider", None)
++        if callable(provider):
++            messages = list(sent.get("messages") or [])
++            non_system = [item for item in messages if item.get("role") != "system"]
++            user_text = ""
++            prior = non_system
++            if non_system and non_system[-1].get("role") == "user":
++                user_text = str(non_system[-1].get("content") or "")
++                prior = non_system[:-1]
++            extra = provider(
++                query=user_text,
++                user_id=str(getattr(self, "_current_user_id", "") or ""),
++                history=prior,
++            )
++            if extra and str(extra).strip():
++                blocks.append(str(extra).strip())
++        snippet = str(getattr(self, "_kernel_memory_snippet", "") or "").strip()
++        if snippet:
++            if "<memory-context>" not in snippet:
++                snippet = f"<memory-context>\n{snippet}\n</memory-context>"
++            blocks.append(snippet)
++        if blocks:
++            addition = "\n\n".join(blocks)
++            messages = [dict(item) for item in (sent.get("messages") or [])]
++            if messages and messages[0].get("role") == "system":
++                messages[0]["content"] = f"{messages[0].get('content') or ''}\n\n{addition}".strip()
++            else:
++                messages.insert(0, {"role": "system", "content": addition})
++            sent["messages"] = messages
++        return self.client.chat.completions.create(**sent)
++
+     def _add_memory_context(self, query: str, user_id: str) -> str:
+-        """添加记忆上下文"""
++        """Retrieve kernel memory and store the raw user sentence.
++
++        The retrieved text is held for ``_dispatch_chat_completion``. It is not
++        concatenated onto the user message.
++        """
++        self._kernel_memory_snippet = ""
+         if self.memory is None:
+             return query
+ 
+@@ -1483,7 +1532,9 @@
+                 scope="agent",
+             )
+ 
+-        return f"{context}\n##用户提问：\n{query}" if context else query
++        if context.strip():
++            self._kernel_memory_snippet = context.strip()
++        return query
+ 
+     def _retrieve_memory_with_hooks(
+             self,
+@@ -2083,7 +2134,7 @@
+                 return hook_error
+ 
+             try:
+-                response = self.client.chat.completions.create(**self.chat_params)
++                response = self._dispatch_chat_completion(self.chat_params)
+             except Exception as e:
+                 self._complete_model_request(error=e)
+                 error_msg = format_lightagent_error(e, "continue chat completion")
+@@ -2433,7 +2484,7 @@
+                                 yield hook_error
+                                 return
+                             try:
+-                                response = self.client.chat.completions.create(**self.chat_params)
++                                response = self._dispatch_chat_completion(self.chat_params)
+                             except Exception as e:
+                                 self._complete_model_request(error=e)
+                                 error_msg = format_lightagent_error(e, "continue streaming chat completion")
+--- /tmp/overlay/local/memory/inject.py	2026-10-12 09:25:09.000000000 +0000
++++ local/memory/inject.py	2026-10-12 09:57:17.459068935 +0000
+@@ -69,6 +69,12 @@
+     return texts
+ 
+ 
++def compose_system(system: str, persona: str, identity_block: str, ephemeral: str) -> str:
++    """Order: base system, persona, identity, memory pack. All ephemeral."""
++    parts = [part.strip() for part in (system, persona, identity_block, ephemeral) if part and part.strip()]
++    return "\n\n".join(parts)
++
++
+ def prepare_turn(
+     *,
+     system: str,
+@@ -78,29 +84,40 @@
+     store: ProfileStore | None = None,
+     budget_tokens: int | None = None,
+     cache: PackCache | None = None,
++    persona_text: str | None = None,
++    identity_block: str | None = None,
++    share_user_profile: bool = True,
+ ) -> PreparedTurn:
+-    """Build the model request. ``user_text`` is appended unchanged."""
++    """Build the model request. ``user_text`` is appended unchanged.
++
++    ``persona_text=None`` loads the global persona files. A string replaces
++    them (override). ``identity_block`` is the per-bot role and is never
++    written to the profile store. ``share_user_profile=False`` skips the pack.
++    """
+     host = host or current_host()
+     store = store or get_store()
+     history = list(history or [])
+-    kwargs = {}
+-    if budget_tokens is not None:
+-        kwargs["budget_tokens"] = budget_tokens
+-    pack = build_for_turn(
+-        store,
+-        host,
+-        query=user_text,
+-        window_texts=_window_texts(history, user_text),
+-        cache=cache,
+-        **kwargs,
+-    )
+-    ephemeral = render_ephemeral(pack)
+-    system_content = system or ""
+-    persona = persona_system_block()
+-    if persona:
+-        system_content = f"{system_content}\n\n{persona}".strip()
+-    if ephemeral:
+-        system_content = f"{system_content}\n\n{ephemeral}".strip()
++    if share_user_profile:
++        kwargs = {}
++        if budget_tokens is not None:
++            kwargs["budget_tokens"] = budget_tokens
++        pack = build_for_turn(
++            store,
++            host,
++            query=user_text,
++            window_texts=_window_texts(history, user_text),
++            cache=cache,
++            **kwargs,
++        )
++        ephemeral = render_ephemeral(pack)
++    else:
++        pack = MemoryPack(markdown="", tokens=0)
++        ephemeral = ""
++    if persona_text is None:
++        persona = persona_system_block()
++    else:
++        persona = persona_system_block(persona_text) if str(persona_text).strip() else ""
++    system_content = compose_system(system or "", persona, identity_block or "", ephemeral)
+ 
+     messages: list[dict] = [{"role": "system", "content": system_content}]
+     for message in history:
+@@ -118,6 +135,8 @@
+         detail = "memory pack 注入 system/instruction，未写入 user 消息。"
+     else:
+         detail = "本轮没有可注入的画像。"
++    if (identity_block or "").strip():
++        detail = f"{detail} 身份块已注入 system，未写入用户画像。"
+     return PreparedTurn(
+         messages=messages,
+         user_text=user_text,
+@@ -136,6 +155,10 @@
+     agent_id: str | None = None,
+     space_id: str | None = None,
+     store: ProfileStore | None = None,
++    persona_text: str | None = None,
++    identity_block: str | None = None,
++    share_user_profile: bool = True,
++    context_getter=None,
+ ):
+     """Install a provider the LightAgent runtime calls before each model request.
+ 
+@@ -157,6 +180,7 @@
+ 
+     def provider(*, query: str, user_id: str, history: list) -> str:
+         del user_id  # host stamp wins over the run/model user id
++        extra = context_getter() if context_getter else {}
+         prepared = prepare_turn(
+             system="",
+             history=history,
+@@ -164,14 +188,12 @@
+             host=host,
+             store=profile_store,
+             cache=cache,
++            persona_text=extra.get("persona_text", persona_text),
++            identity_block=extra.get("identity_block", identity_block),
++            share_user_profile=extra.get("share_user_profile", share_user_profile),
+         )
+-        blocks = []
+-        persona = persona_system_block()
+-        if persona:
+-            blocks.append(persona)
+-        if prepared.ephemeral:
+-            blocks.append(prepared.ephemeral)
+-        return "\n\n".join(blocks)
++        # System lane only. prepare_turn already kept the user sentence intact.
++        return prepared.messages[0]["content"] if prepared.messages else ""
+ 
+     agent.ephemeral_context_provider = provider
+     agent._profile_memory_host = host
+--- /tmp/overlay/local/memory/persona.py	2026-10-12 09:25:09.000000000 +0000
++++ local/memory/persona.py	2026-10-12 09:49:51.057798620 +0000
+@@ -22,8 +22,13 @@
+     return "\n\n".join(parts)
+ 
+ 
+-def persona_system_block() -> str:
+-    text = load_persona_text()
++def persona_system_block(text: str | None = None) -> str:
++    """Wrap persona text. ``None`` reads the global SOUL and IDENTITY files."""
++    if text is None:
++        text = load_persona_text()
++    text = (text or "").strip()
+     if not text:
+         return ""
++    if text.startswith("<persona>") and text.endswith("</persona>"):
++        return text
+     return f"<persona>\n{text}\n</persona>"
+\ No newline at end of file
+--- /tmp/overlay/local/openrouter_config.py	2026-10-12 09:32:33.000000000 +0000
++++ local/openrouter_config.py	2026-10-12 09:50:20.909488270 +0000
+@@ -50,7 +50,15 @@
+     return u
+ 
+ 
++# Incremented only when a real quota check runs. Tests keep this at 0.
++NETWORK_CALLS = 0
++
++
+ def _check_and_count():
++    global NETWORK_CALLS
++    NETWORK_CALLS += 1
++    if os.environ.get("LIGHTAGENT_FORBID_OPENROUTER") == "1":
++        raise RuntimeError("OpenRouter blocked by LIGHTAGENT_FORBID_OPENROUTER")
+     u = _load_usage()
+     now = time.time()
+     u["recent"] = [t for t in u["recent"] if now - t < 60]
+@@ -72,9 +80,29 @@
+     from LightAgent import LightAgent
+     from local.memory.inject import attach_profile_memory
+ 
++    persona_text = kwargs.pop("persona_text", None)
++    identity_block = kwargs.pop("identity_block", None)
++    share_user_profile = kwargs.pop("share_user_profile", True)
++    session_id = kwargs.pop("session_id", None)
++    agent_id = kwargs.pop("agent_id", None)
++    space_id = kwargs.pop("space_id", None)
++    # Collaboration must not turn tree-of-thought on by default.
++    kwargs.setdefault("tree_of_thought", False)
++    if os.environ.get("LIGHTAGENT_FORBID_OPENROUTER") == "1":
++        raise RuntimeError("OpenRouter blocked by LIGHTAGENT_FORBID_OPENROUTER")
++
+     agent = LightAgent(model=model, api_key=get_api_key(), base_url=OPENROUTER_BASE_URL, **kwargs)
+     # Profile pack is local. This does not call OpenRouter.
+-    attach_profile_memory(agent, user_id=os.environ.get("LIGHTAGENT_USER_ID", "local-user"))
++    attach_profile_memory(
++        agent,
++        user_id=os.environ.get("LIGHTAGENT_USER_ID", "local-user"),
++        session_id=session_id,
++        agent_id=agent_id,
++        space_id=space_id,
++        persona_text=persona_text,
++        identity_block=identity_block,
++        share_user_profile=share_user_profile,
++    )
+     return agent
+ 
+ 

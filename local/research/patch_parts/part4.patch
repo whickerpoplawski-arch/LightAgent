@@ -1,0 +1,349 @@
+--- /tmp/overlay/local/tui/app.tcss	2026-10-12 09:32:33.000000000 +0000
++++ local/tui/app.tcss	2026-10-12 09:57:17.419068608 +0000
+@@ -114,6 +114,35 @@
+ .session-row .s-meta { width: 1fr; height: 5; padding: 1 0 0 0; content-align: left middle; }
+ .session-row .s-title { text-style: bold; height: 1; }
+ .session-row .s-preview { color: #8e8e93; height: 1; }
++.session-row.unread .s-title { text-style: bold; color: #1d4ed8; }
++.session-row.is-hidden { color: #8e8e93; }
++.nav-disabled {
++    height: 3;
++    margin: 0 1 1 1;
++    padding: 0 1;
++    color: #a1a1aa;
++    border: round #e5e5ea;
++    background: transparent;
++    content-align: left middle;
++}
++
++#menu-dialog, #identity-dialog {
++    width: 72;
++    height: auto;
++    max-height: 90%;
++    padding: 1 2;
++    background: #ffffff;
++    border: round #d4d4d8;
++    margin: 1 2;
++}
++#identity-dialog { height: 90%; }
++#identity-form { height: 1fr; }
++#menu-title { text-style: bold; height: 1; }
++#menu-hint { color: #8e8e93; height: auto; margin: 0 0 1 0; }
++#menu-buttons { height: 3; margin-top: 1; }
++#menu-buttons Button { margin-right: 1; }
++#identity-job, #identity-persona { height: 5; margin-bottom: 1; }
++#identity-role, #identity-display, #identity-template, #identity-persona-mode { margin-bottom: 1; }
+ 
+ #side-foot {
+     height: 3;
+--- /tmp/overlay/local/tui/backend.py	2026-10-12 09:32:33.000000000 +0000
++++ local/tui/backend.py	2026-10-12 09:51:44.957179719 +0000
+@@ -42,6 +42,21 @@
+     cache_hit_pct: float = 0.0
+ 
+ 
++@dataclass
++class TurnContext:
++    """Per-turn identity and collaboration. The user sentence stays in ``prompt``."""
++
++    identity_block: str = ""
++    persona_text: str | None = None
++    share_user_profile: bool = True
++    session_id: str | None = None
++    agent_id: str | None = None
++    space_id: str | None = None
++    collaboration_enabled: bool = True
++    roster: list = field(default_factory=list)
++    quota: object | None = None
++
++
+ def _fmt_call(call: dict) -> str:
+     args = call.get("arguments") or ""
+     try:
+@@ -56,8 +71,9 @@
+ 
+     name = "mock-echo:free"
+ 
+-    def __init__(self) -> None:
++    def __init__(self, *, delay: float = 0.55) -> None:
+         self._mock_used = 0  # 仅展示用，不碰 OpenRouter 计数
++        self._delay = delay
+         self.plugin_tool_names: list[str] = []
+         self.reload_plugins()
+ 
+@@ -80,18 +96,37 @@
+     def usage(self) -> int:
+         return self._mock_used
+ 
+-    def chat(self, history: list[dict], prompt: str) -> Reply:
++    def chat(self, history: list[dict], prompt: str, turn: TurnContext | None = None) -> Reply:
+         # 模拟“流式思考”耗时，方便 UI 刷 tok/s
+-        time.sleep(0.55)
++        if self._delay:
++            time.sleep(self._delay)
+         self._mock_used += 1
+         t0 = 420 + random.randint(0, 180)
+         steps: list[TraceStep] = []
+         calls: list[str] = []
++        turn = turn or TurnContext()
+ 
+         # 上下文快照。mock 不发请求，但按正式路径组装 ephemeral pack，且不改用户原话。
++        from local.memory.host import MemoryHost
+         from local.memory.inject import prepare_turn
+ 
+-        prepared = prepare_turn(system="LightAgent 中文助手", history=history, user_text=prompt)
++        prepared = prepare_turn(
++            system="LightAgent 中文助手",
++            history=history,
++            user_text=prompt,
++            host=MemoryHost(
++                user_id="local-user",
++                session_id=turn.session_id,
++                agent_id=turn.agent_id,
++                space_id=turn.space_id,
++            ),
++            persona_text=turn.persona_text,
++            identity_block=turn.identity_block,
++            share_user_profile=turn.share_user_profile,
++        )
++        if prepared.user_text != prompt:
++            raise RuntimeError("identity injection changed the user message")
++        delegate_steps, delegate_content = self._maybe_delegate(prompt, turn, prepared.ephemeral)
+         steps.append(
+             TraceStep(
+                 kind="context",
+@@ -102,6 +137,28 @@
+                 lane="other",
+             )
+         )
++        if delegate_content is not None:
++            steps.extend(delegate_steps)
++            steps.append(
++                TraceStep(
++                    kind="assistant",
++                    summary=delegate_content.replace("\n", " ")[:48],
++                    detail=delegate_content,
++                    tokens=48,
++                    duration_ms=40,
++                    lane="model",
++                )
++            )
++            return Reply(
++                model=self.name,
++                content=delegate_content,
++                tool_calls=["delegate_to_bot"] if any(step.kind == "delegate" for step in delegate_steps) else [],
++                steps=steps,
++                tokens_in=80,
++                tokens_out=48,
++                duration_ms=max(t0, 200),
++                cache_hit_pct=0.0,
++            )
+ 
+         if "天气" in prompt:
+             # 模型思考
+@@ -242,6 +299,59 @@
+             cache_hit_pct=round(cache, 1),
+         )
+ 
++    def _maybe_delegate(self, prompt: str, turn: TurnContext, ephemeral: str, *, mode: str = "mock"):
++        """Resolve ``@角色``. Disabled collaboration leaves the sentence as text."""
++        from local.conversations.collaborate import DelegateError, plan_mention, run_delegation
++
++        plan = plan_mention(prompt, list(turn.roster or []), enabled=turn.collaboration_enabled)
++        if plan.notice and not plan.should_call:
++            return [
++                TraceStep(
++                    kind="context",
++                    summary=plan.notice,
++                    detail=prompt,
++                    lane="other",
++                )
++            ], f"（mock）你说的是：`{prompt}`\n\n{plan.notice}"
++        if not plan.should_call or plan.target is None:
++            return [], None
++        parent_messages: list[dict] = []
++        try:
++            outcome = run_delegation(
++                roster=list(turn.roster),
++                bot_id=plan.target.id,
++                task=plan.task,
++                context_summary="",
++                quota=turn.quota,
++                profile_block=ephemeral if turn.share_user_profile else "",
++                parent_messages=parent_messages,
++                mode=mode,
++            )
++        except DelegateError as exc:
++            return [
++                TraceStep(
++                    kind="error",
++                    summary=str(exc)[:80],
++                    detail=str(exc),
++                    status="error",
++                    lane="other",
++                )
++            ], f"派发失败：{exc}"
++        for message in parent_messages:
++            blob = str(message.get("content") or "")
++            if "<memory-context>" in blob or "<identity>" in blob:
++                raise RuntimeError("delegate wrote pack or identity into the parent transcript")
++        step = TraceStep(
++            kind="delegate",
++            summary=f"派发 · {plan.target.identity.role_title or plan.target.title}",
++            detail=outcome.result,
++            tool_name="delegate_to_bot",
++            tool_args=plan.task,
++            tool_result=outcome.parent_tool_result,
++            lane="other",
++        )
++        return [step], f"（mock）{outcome.result}"
++
+ 
+ class OpenRouterBackend:
+     """只用 :free 模型；每次调用前经过 openrouter_config 的本地计数（每日上限 45）。"""
+@@ -257,7 +367,21 @@
+     def usage(self) -> int:
+         return orc.usage_today()
+ 
+-    def chat(self, history: list[dict], prompt: str) -> Reply:
++    def chat(self, history: list[dict], prompt: str, turn: TurnContext | None = None) -> Reply:
++        import os
++
++        turn = turn or TurnContext()
++        child_mode = "live" if os.environ.get("LIGHTAGENT_ALLOW_OPENROUTER") == "1" else "mock"
++        delegate_steps, delegate_content = self._maybe_delegate(prompt, turn, "", mode=child_mode)
++        if delegate_content and delegate_content.startswith("派发失败"):
++            return Reply(
++                model=self.name,
++                content=delegate_content,
++                steps=delegate_steps,
++            )
++        run_history = list(history)
++        if delegate_content:
++            run_history.append({"role": "assistant", "content": delegate_content})
+         last = None
+         t_start = time.time()
+         for model in orc.FREE_MODELS:
+@@ -265,11 +389,27 @@
+             orc._check_and_count()  # 超过本地上限会直接抛错，不发请求
+             try:
+                 self._tools = _merged_tools()  # 每次对话热加载插件工具
+-                agent = orc.make_agent(model=model, instructions=self.instructions)
++                # Drop the delegate tool when this call is itself a child (depth >= 1).
++                from local.conversations.collaborate import child_delegate_tools_allowed, get_runtime
++
++                tools = self._tools
++                if not child_delegate_tools_allowed(get_runtime().depth):
++                    tools = [tool for tool in tools if getattr(tool, "__name__", "") != "delegate_to_bot"]
++                agent = orc.make_agent(
++                    model=model,
++                    instructions=self.instructions,
++                    tree_of_thought=False,
++                    persona_text=turn.persona_text,
++                    identity_block=turn.identity_block,
++                    share_user_profile=turn.share_user_profile,
++                    session_id=turn.session_id,
++                    agent_id=turn.agent_id,
++                    space_id=turn.space_id,
++                )
+                 res = agent.run(
+                     prompt,
+-                    tools=self._tools,
+-                    history=list(history),
++                    tools=tools,
++                    history=run_history,
+                     result_format="object",
+                     user_id="local-user",
+                 )
+@@ -288,7 +428,8 @@
+                         summary=f"会话上下文 · 历史 {len(history)} 条",
+                         tokens=0,
+                         lane="other",
+-                    )
++                    ),
++                    *delegate_steps,
+                 ]
+                 if calls_raw:
+                     steps.append(
+--- /tmp/overlay/local/tui/tools.py	2026-10-12 09:32:33.000000000 +0000
++++ local/tui/tools.py	2026-10-12 09:50:20.969487772 +0000
+@@ -3,6 +3,7 @@
+ 内置一等联网工具见 local.tools.web（web_search / web_fetch），不是插件。
+ """
+ 
++from local.conversations.collaborate import delegate_to_bot
+ from local.memory.tools import MEMORY_TOOLS
+ from local.tools.web import web_fetch, web_search
+ 
+@@ -20,4 +21,4 @@
+     ],
+ }
+ 
+-TOOLS = [get_weather, web_search, web_fetch, *MEMORY_TOOLS]
++TOOLS = [get_weather, web_search, web_fetch, delegate_to_bot, *MEMORY_TOOLS]
+--- /tmp/overlay/local/tui/trace.py	2026-10-12 04:45:19.000000000 +0000
++++ local/tui/trace.py	2026-10-12 09:50:21.337484764 +0000
+@@ -12,6 +12,7 @@
+     "context": "#16a34a",    # 绿
+     "model": "#7c3aed",
+     "error": "#dc2626",
++    "delegate": "#0f766e",
+ }
+ 
+ KIND_LABEL = {
+@@ -21,6 +22,7 @@
+     "context": "上下文",
+     "model": "模型",
+     "error": "错误",
++    "delegate": "派发",
+ }
+ 
+ # 时间线泳道
+@@ -56,6 +58,7 @@
+                 "tool": "tool",
+                 "context": "other",
+                 "error": "other",
++                "delegate": "other",
+             }.get(self.kind, "other")
+ 
+     @property
+--- /tmp/overlay/local/tui/README.md	2026-10-12 07:56:27.000000000 +0000
++++ local/tui/README.md	2026-10-12 09:59:01.147558384 +0000
+@@ -45,6 +45,9 @@
+ | Ctrl+K | 搜索会话 |
+ | Ctrl+L | 清空当前会话（含轨迹） |
+ | Ctrl+, | 打开设置（插件） |
++| Ctrl+Shift+I | 设定当前 Bot 的身份（职位和职责，模板只是可选起稿） |
++| `:` 或 `m` | 焦点在侧栏会话行上时，打开同一套会话菜单 |
++| Delete | 焦点在会话行上时，确认删除 |
+ | Ctrl+Q | 退出 |
+ 
+ 侧栏「+」按钮也可新建会话。
+@@ -52,7 +55,7 @@
+ ## UI 要点
+ 
+ - **设置 / 插件**：左下角 ⚙（或 Ctrl+,）打开设置层；左侧导航「插件」为首项；上方搜索/安装框支持本地路径、`owner/repo`、GitHub URL（git clone）；列表行标题 + 开关，写入 `local/plugins/enabled.json`，下次对话热加载工具（0 marketplace）
+- **侧栏**：「项目」（可展开文件夹 +「+ 新项目」/ 行内 + 新建会话）与「会话」（未分组，按最后活动时间降序）；Ctrl+P 新项目，Ctrl+N 在当前项目或未分组新建会话
++- **侧栏**：「项目」（可展开文件夹 +「+ 新项目」/ 行内 + 新建会话）与「会话」（未分组，按最后活动时间降序）；置顶区在最上面；「显示已隐藏」恢复被收起的对话。Ctrl+P 新项目，Ctrl+N 在当前项目或未分组新建会话。焦点在会话行上按 `:` 或 `m`（或右键）打开菜单：置顶、移至分组、未读、重命名、设定身份、复制 ID、隐藏、删除。身份由用户填写职位和职责，模板只是可选起稿。详见 `local/conversations/README.md`。
+ - **对话页**：用户蓝圆角气泡右对齐；Agent 灰圆角气泡左对齐；工具调用灰色斜体小胶囊
+ - **轨迹页**：
+   - 顶栏：时长 / 轮次 / 调用数 + 轨迹搜索
+--- /tmp/LightAgent/README.zh-CN.md	2026-10-12 09:42:20.542177258 +0000
++++ README.zh-CN.md	2026-10-12 09:58:55.295559289 +0000
+@@ -36,6 +36,7 @@
+   <h1>LightAgent🚀 超轻量、可“成长”的智能体框架，现已原生支持Skill</h1>
+ </div>
+ 
++本分叉在 `local/` 加了多对话身份：侧栏多个 Bot、每个对话一份你自己写的职位/职责、以及单层 `delegate_to_bot`。说明见 [`local/conversations/README.md`](local/conversations/README.md)。
+ 
+ 🚀 **LightAgent** 
+ 不再只是“聊天”，而是真正的“完成任务”。LightAgent 把记忆（`mem0`）、工具（`Tools`）、思维树（`ToT`）和多智能体协作融合进一个极简的包中，而你只需 **一行代码** 就能构建一个**能自我学习、按需加载Skill**的智能体 —— 就像给大模型装上“招式库”与“执行大脑”。
+--- /tmp/LightAgent/.gitignore	2026-10-12 09:42:20.538177095 +0000
++++ .gitignore	2026-10-12 09:59:37.847575503 +0000
+@@ -4,3 +4,6 @@
+ LightAgent/__pycache__/__init__.cpython-311.pyc
+ LightAgent/__pycache__/la_core.cpython-311.pyc
+ dist/
++local/data/
++local/.openrouter_usage.json
++logs/

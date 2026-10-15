@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"/>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#e8e8ed;font-family:-apple-system,"Noto Sans CJK SC",sans-serif;color:#1c1c1e}
+.shell{display:flex;width:1200px;height:860px;margin:16px auto;background:#fafafa;border-radius:16px;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,.08)}
+.side{width:300px;background:#f5f5f7;border-right:1px solid #e5e5ea;padding:14px 12px;overflow:auto}
+.top{display:flex;align-items:center;justify-content:space-between;padding:4px 6px 10px}
+.brand{font-weight:700;font-size:17px}
+.newbtn{width:36px;height:36px;border-radius:12px;border:1.5px solid #93c5fd;color:#2563eb;background:#fff;font-size:22px;line-height:32px;text-align:center;font-weight:700}
+.search{display:flex;align-items:center;gap:8px;margin:0 4px 12px;padding:10px 12px;border-radius:14px;border:1px solid #d4d4d8;background:#fff;color:#8e8e93;font-size:13px}
+.sec{color:#8e8e93;font-size:12px;font-weight:700;margin:10px 8px 4px}
+.navact{margin:0 4px 8px;padding:10px 12px;border-radius:14px;border:1.5px solid #93c5fd;color:#2563eb;background:#fff;font-size:13px}
+.item{display:flex;gap:12px;align-items:center;padding:10px 12px;border-radius:16px;margin:3px 0}
+.item.on{background:#e8e8ed}
+.item img.av{width:44px;height:44px;flex-shrink:0}
+.item b{display:block;font-size:14px}
+.item .prev{color:#8e8e93;font-size:12px;margin-top:2px}
+.main{flex:1;display:flex;flex-direction:column;background:#fafafa;min-width:0}
+.head{padding:16px 24px;border-bottom:1px solid #ebebef;font-weight:700;font-size:16px}
+.tabs{padding:0 24px;border-bottom:1px solid #ebebef;color:#8e8e93;font-size:14px}
+.tabs span{display:inline-block;padding:10px 14px;margin-right:4px}
+.tabs .on{color:#2f7cf6;border-bottom:2px solid #2f7cf6;font-weight:600}
+.chat{flex:1;padding:20px 28px;overflow:auto}
+.row{margin:16px 0;display:flex}
+.row.user{justify-content:flex-end}
+.row.agent{justify-content:flex-start}
+.row img{max-width:100%;height:auto;display:block}
+.tool{display:inline-block;margin:6px 0 6px 56px;padding:6px 14px;border-radius:14px;border:1px solid #e5e5ea;color:#8e8e93;font-size:13px;background:#fff}
+.composer{margin:8px 24px 0;padding:12px 16px;border-radius:22px;border:1.5px solid #93c5fd;background:#fff;color:#8e8e93;display:flex;align-items:center;justify-content:space-between}
+.composer .send{color:#2563eb;font-weight:700}
+.stats{margin:8px 24px 16px;padding:8px 4px;display:flex;align-items:center;justify-content:space-between;color:#8e8e93;font-size:13px}
+.stats .left{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.stats .pill{padding:4px 10px;border-radius:12px;border:1px solid #93c5fd;color:#2563eb;font-weight:700}
+</style></head><body>
+<div class="shell">
+  <div class="side">
+    <div class="top"><div class="brand">✨ LightAgent</div><div class="newbtn">+</div></div>
+    <div class="search">🔍 搜索项目/会话</div>
+    <div class="sec">项目</div>
+    <div class="navact">+ 新项目</div>
+    <div class="item on"><img class="av" src="accept_full_assets/side_orange_cloud.png"/><div><b>TUI 气泡样式</b><div class="prev">当前会话</div></div></div><div class="item"><img class="av" src="accept_full_assets/side_pink_cloud.png"/><div><b>轨迹可视化</b><div class="prev">泳道+feed</div></div></div>
+    <div class="sec">群聊</div>
+    <div class="navact">创建群聊</div>
+    <div class="item"><img class="av" src="accept_full_assets/side_blue_drop.png"/><div><b>健身+饮食群</b><div class="prev">Host · 2 成员</div></div></div>
+    <div class="sec">会话</div>
+    <div class="item"><img class="av" src="accept_full_assets/side_black_star.png"/><div><b>随便问问</b><div class="prev">（未分组）晴</div></div></div><div class="item"><img class="av" src="accept_full_assets/side_brown_hex.png"/><div><b>灵感备忘</b><div class="prev">已记下</div></div></div><div class="item"><img class="av" src="accept_full_assets/side_blue_tri.png"/><div><b>免费额度护栏</b><div class="prev">本地 45 次</div></div></div>
+  </div>
+  <div class="main">
+    <div class="head">TUI 气泡样式 · mock-echo:free</div>
+    <div class="tabs"><span class="on">对话</span><span>记忆</span><span>轨迹</span></div>
+    <div class="chat"><div class="row user"><img src="accept_full_assets/u0.png"/></div><div class="row agent"><img src="accept_full_assets/a1.png"/></div><div class="row agent"><img src="accept_full_assets/a2.png"/></div><div class="row user"><img src="accept_full_assets/u3.png"/></div><div class="row agent"><img src="accept_full_assets/a4.png"/></div>
+<div class="tool">⚙  工具调用 · get_weather(上海)</div>
+<div class="tool">⚙  工具调用 · web_search(上海 今日天气)</div>
+</div>
+    <div class="composer"><span>+  给 LightAgent 发消息…</span><span class="send">›</span></div>
+    <div class="stats">
+      <div class="left">⚡ 2 轮 · 10 步 · 55 tok/s · 528 tok · 缓存命中 69% · 今日用量 2/45</div>
+      <div class="pill">◉ 2%</div>
+    </div>
+  </div>
+</div>
+</body></html>

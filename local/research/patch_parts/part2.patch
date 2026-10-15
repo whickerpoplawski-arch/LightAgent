@@ -1,0 +1,380 @@
+--- /tmp/overlay/local/tui/app.py	2026-10-12 09:32:33.000000000 +0000
++++ local/tui/app.py	2026-10-12 09:54:36.061857297 +0000
+@@ -10,6 +10,7 @@
+ import re
+ import time
+ from dataclasses import dataclass, field
++from pathlib import Path
+ 
+ from textual import on, work
+ from textual.app import App, ComposeResult
+@@ -17,6 +18,16 @@
+ from textual.containers import Horizontal, Vertical, VerticalScroll
+ from textual.widgets import Input, Label, ListItem, ListView, Markdown, Static, TabbedContent, TabPane
+ 
++from local.conversations.context_menu import (
++    Workspace,
++    apply_action,
++    menu_entries,
++    move_targets,
++    sidebar_sections,
++)
++from local.conversations.identity_inject import blocks_for_meta
++from local.conversations.models import BotIdentity, ConversationMeta, ProjectGroup
++from local.conversations.store import StoredWorkspace, Transcript, load_workspace, save_workspace
+ from local.memory.host import MemoryHost, bind_host
+ from local.memory.tui_panel import MemoryPanel
+ from local.tui.projects import Project, fmt_ago, touch
+@@ -60,6 +71,14 @@
+     id: str = field(default_factory=lambda: __import__("uuid").uuid4().hex[:8])
+     project_id: str | None = None
+     updated_at: float = field(default_factory=time.time)
++    created_at: float = field(default_factory=time.time)
++    pinned: bool = False
++    hidden: bool = False
++    unread: bool = False
++    identity: BotIdentity = field(default_factory=BotIdentity)
++    share_user_profile: bool = True
++    agent_id: str | None = None
++    space_id: str | None = None
+ 
+     def __post_init__(self) -> None:
+         if not self.avatar or not self.accent:
+@@ -68,6 +87,12 @@
+                 self.avatar = emoji
+             if not self.accent:
+                 self.accent = accent
++        if not isinstance(self.identity, BotIdentity):
++            self.identity = BotIdentity.from_dict(self.identity)
++        if not self.agent_id:
++            self.agent_id = f"bot-{self.id}"
++        if self.space_id is None:
++            self.space_id = self.project_id
+ 
+     @property
+     def preview(self) -> str:
+@@ -78,7 +103,9 @@
+ 
+ 
+ class SessionRow(Horizontal):
+-    """侧栏会话行（项目内缩进或未分组）。"""
++    """侧栏会话行。焦点在行上时 ``:`` 或 ``m`` 打开菜单，右键同样打开。"""
++
++    can_focus = True
+ 
+     def __init__(self, session: Session, *, nested: bool = False) -> None:
+         classes = "session-row nested" if nested else "session-row"
+@@ -86,11 +113,20 @@
+         self.session = session
+         self.nested = nested
+ 
++    def _title(self) -> str:
++        bits = []
++        if self.session.pinned:
++            bits.append("📌")
++        if self.session.unread:
++            bits.append("●")
++        prefix = (" ".join(bits) + " ") if bits else ""
++        return f"{prefix}{self.session.title}"
++
+     def compose(self) -> ComposeResult:
+         pad = "  " if self.nested else ""
+         yield Static(f"{pad}{self.session.avatar}", classes="s-avatar")
+         with Vertical(classes="s-meta"):
+-            yield Label(self.session.title, classes="s-title")
++            yield Label(self._title(), classes="s-title")
+             yield Label(
+                 f"{self.session.preview} · {fmt_ago(self.session.updated_at)}",
+                 classes="s-preview",
+@@ -101,20 +137,54 @@
+         app = self.app
+         if isinstance(app, LightAgentTUI) and app.current is self.session:
+             self.add_class("selected")
++        self._sync_flags()
++
++    def _sync_flags(self) -> None:
++        if self.session.unread:
++            self.add_class("unread")
++        else:
++            self.remove_class("unread")
++        if self.session.hidden:
++            self.add_class("is-hidden")
++        else:
++            self.remove_class("is-hidden")
+ 
+     def refresh_text(self) -> None:
+         pad = "  " if self.nested else ""
+         self.query_one(".s-avatar", Static).update(f"{pad}{self.session.avatar}")
+-        self.query_one(".s-title", Label).update(self.session.title)
++        self.query_one(".s-title", Label).update(self._title())
+         self.query_one(".s-preview", Label).update(
+             f"{self.session.preview} · {fmt_ago(self.session.updated_at)}"
+         )
++        self._sync_flags()
+ 
+     def on_click(self) -> None:
+         app = self.app
+         if isinstance(app, LightAgentTUI):
+             app.select_session(self.session)
+ 
++    def on_key(self, event) -> None:
++        app = self.app
++        if not isinstance(app, LightAgentTUI):
++            return
++        if event.key in ("colon", "m"):
++            app.open_session_menu(self.session)
++            event.stop()
++            event.prevent_default()
++        elif event.key == "delete":
++            app.confirm_delete_session(self.session)
++            event.stop()
++            event.prevent_default()
++
++    def on_mouse_down(self, event) -> None:
++        button = getattr(event, "button", 1)
++        value = getattr(button, "value", button)
++        if value == 3 or str(button).lower().endswith("right"):
++            app = self.app
++            if isinstance(app, LightAgentTUI):
++                app.open_session_menu(self.session)
++                event.stop()
++
+ 
+ class ProjectRow(Vertical):
+     """可展开项目：标题行 + 下属会话。"""
+@@ -327,6 +397,128 @@
+     return sessions, [p1, p2]
+ 
+ 
++def meta_from_session(session: Session) -> ConversationMeta:
++    identity = session.identity
++    return ConversationMeta(
++        id=session.id,
++        title=session.title,
++        avatar=session.avatar,
++        accent=session.accent,
++        project_id=session.project_id,
++        space_id=session.space_id,
++        pinned=session.pinned,
++        hidden=session.hidden,
++        unread=session.unread,
++        updated_at=session.updated_at,
++        created_at=session.created_at,
++        identity=BotIdentity(
++            display_name=identity.display_name,
++            role_title=identity.role_title,
++            job_description=identity.job_description,
++            template_id=identity.template_id,
++            persona_mode=identity.persona_mode,
++            persona_text=identity.persona_text,
++        ),
++        share_user_profile=session.share_user_profile,
++        agent_id=session.agent_id,
++    )
++
++
++def apply_meta_to_session(session: Session, meta: ConversationMeta) -> None:
++    session.title = meta.title
++    session.avatar = meta.avatar
++    session.accent = meta.accent
++    session.project_id = meta.project_id
++    session.space_id = meta.space_id
++    session.pinned = meta.pinned
++    session.hidden = meta.hidden
++    session.unread = meta.unread
++    session.updated_at = meta.updated_at
++    session.created_at = meta.created_at
++    session.identity = BotIdentity.from_dict(meta.identity.to_dict())
++    session.share_user_profile = meta.share_user_profile
++    session.agent_id = meta.agent_id
++
++
++def trace_to_dict(session: Session) -> dict:
++    return {
++        "steps": [
++            {
++                "kind": step.kind,
++                "summary": step.summary,
++                "detail": step.detail,
++                "status": step.status,
++                "tokens": step.tokens,
++                "duration_ms": step.duration_ms,
++                "lane": step.lane,
++                "tool_name": step.tool_name,
++                "tool_args": step.tool_args,
++                "tool_result": step.tool_result,
++            }
++            for step in session.trace.steps
++        ],
++        "stats": {
++            "rounds": session.trace.stats.rounds,
++            "steps": session.trace.stats.steps,
++            "tokens": session.trace.stats.tokens,
++            "tok_per_s": session.trace.stats.tok_per_s,
++            "cache_hit_pct": session.trace.stats.cache_hit_pct,
++        },
++    }
++
++
++def sessions_from_stored(stored: StoredWorkspace) -> tuple[list[Session], list[Project]]:
++    sessions: list[Session] = []
++    for meta in stored.conversations:
++        transcript = stored.transcripts.get(meta.id, Transcript())
++        session = Session(
++            title=meta.title,
++            messages=list(transcript.messages),
++            events=[(str(kind), str(text)) for kind, text in transcript.events],
++            avatar=meta.avatar,
++            accent=meta.accent,
++            id=meta.id,
++            project_id=meta.project_id,
++            updated_at=meta.updated_at,
++            created_at=meta.created_at,
++            pinned=meta.pinned,
++            hidden=meta.hidden,
++            unread=meta.unread,
++            identity=BotIdentity.from_dict(meta.identity.to_dict()),
++            share_user_profile=meta.share_user_profile,
++            agent_id=meta.agent_id,
++            space_id=meta.space_id,
++        )
++        blob = transcript.trace or {}
++        for item in blob.get("steps") or []:
++            session.trace.steps.append(
++                TraceStep(
++                    kind=str(item.get("kind") or "context"),
++                    summary=str(item.get("summary") or ""),
++                    detail=str(item.get("detail") or ""),
++                    status=str(item.get("status") or "ok"),
++                    tokens=int(item.get("tokens") or 0),
++                    duration_ms=int(item.get("duration_ms") or 0),
++                    lane=str(item.get("lane") or ""),
++                    tool_name=str(item.get("tool_name") or ""),
++                    tool_args=str(item.get("tool_args") or ""),
++                    tool_result=str(item.get("tool_result") or ""),
++                )
++            )
++        stats = blob.get("stats") or {}
++        session.trace.stats.rounds = int(stats.get("rounds") or 0)
++        session.trace.stats.steps = len(session.trace.steps)
++        session.trace.stats.tokens = int(stats.get("tokens") or 0)
++        session.trace.stats.tok_per_s = float(stats.get("tok_per_s") or 0)
++        session.trace.stats.cache_hit_pct = float(stats.get("cache_hit_pct") or 0)
++        sessions.append(session)
++    projects = [
++        Project(group.name, id=group.id, expanded=group.expanded, session_ids=list(group.session_ids))
++        for group in stored.projects
++    ]
++    return sessions, projects
++
++
+ class LightAgentTUI(App):
+     CSS_PATH = "app.tcss"
+     TITLE = "LightAgent"
+@@ -343,6 +535,7 @@
+         Binding("escape", "clear_trace_filters", "清除筛选"),
+         Binding("enter", "jump_trace_to_chat", "跳对话", show=False),
+         Binding("ctrl+comma", "open_settings", "设置", priority=True),
++        Binding("ctrl+shift+i", "edit_identity", "设定身份", priority=True),
+         Binding("ctrl+q", "quit", "退出"),
+     ]
+ 
+@@ -351,11 +544,28 @@
+         backend,
+         sessions: list[Session] | None = None,
+         projects: list[Project] | None = None,
++        *,
++        workspace_dir: str | Path | None = None,
++        persist: bool | None = None,
+     ) -> None:
+         super().__init__()
+         self.backend = backend
+-        if sessions is None and projects is None:
+-            sessions, projects = seed_demo_workspace()
++        self._workspace_dir = Path(workspace_dir) if workspace_dir else (
++            Path(__file__).resolve().parents[1] / "data" / "workspace"
++        )
++        self._show_hidden = False
++        self.collaboration_enabled = True
++        auto = sessions is None and projects is None
++        self._persist = auto if persist is None else persist
++        if auto:
++            loaded = load_workspace(self._workspace_dir) if self._persist else None
++            if loaded is None:
++                sessions, projects = seed_demo_workspace()
++            else:
++                sessions, projects = sessions_from_stored(loaded)
++                if not sessions:
++                    emoji, accent = assign_avatar(0)
++                    sessions = [Session("新会话", avatar=emoji, accent=accent)]
+         elif sessions is None:
+             emoji, accent = assign_avatar(0)
+             sessions = [Session("新会话", avatar=emoji, accent=accent)]
+@@ -383,11 +593,15 @@
+                     yield Static("+", id="new-btn")
+                 yield Input(placeholder="🔍  搜索项目/会话", id="search")
+                 with VerticalScroll(id="nav"):
++                    yield Label("置顶", id="pinned-section", classes="nav-section")
++                    yield Vertical(id="pinned-list")
+                     yield Label("项目", classes="nav-section")
+                     yield Static("+ 新项目", id="new-project-btn", classes="nav-action")
++                    yield Static("创建群聊（稍后）", id="group-chat-btn", classes="nav-disabled")
+                     yield Vertical(id="project-list")
+                     yield Label("会话", classes="nav-section")
+                     yield Vertical(id="ungrouped-list")
++                    yield Static("显示已隐藏", id="show-hidden-btn", classes="nav-action")
+                 with Horizontal(id="side-foot"):
+                     yield Static("P", id="profile-dot")
+                     yield Label("本地 · 免费额度", id="profile-label")
+@@ -433,19 +647,33 @@
+         self.theme = "textual-light"
+         self.query_one("#context-dock").display = False
+         self._sync_memory_host()
++        self._bind_collaboration()
+         self.rebuild_nav()
+         self.load_session(self.current)
+         self.update_stats()
+         self.query_one("#prompt").focus()
++        if self._persist:
++            self.persist_workspace()
+ 
+     def _sync_memory_host(self) -> None:
++        session = self.current
+         bind_host(MemoryHost(
+             user_id="local-user",
+             namespace="profile",
+-            session_id=self.current.id,
+-            agent_id="lightagent-tui",
++            session_id=session.id,
++            agent_id=session.agent_id,
++            space_id=session.space_id or session.project_id,
+         ))
+ 
++    def _bind_collaboration(self) -> None:
++        from local.conversations.collaborate import get_runtime
++
++        runtime = get_runtime()
++        runtime.enabled = self.collaboration_enabled
++        runtime.roster = [meta_from_session(item) for item in self.sessions]
++        runtime.mode = "mock" if self.backend.__class__.__name__ == "MockBackend" else "live"
++        runtime.depth = 0
++
+ 
+     # ---------- 侧栏：项目 / 会话 ----------
+     def sessions_in_project(self, project: Project) -> list[Session]:
+@@ -454,47 +682,140 @@
+ 
+     def ungrouped_sessions(self) -> list[Session]:
+         in_proj = set()
+-        for p in self.projects:
+-            in_proj.update(p.session_ids)
+-            for s in self.sessions:
+-                if s.project_id == p.id:
+-                    in_proj.add(s.id)
++        for project in self.projects:
++            in_proj.update(project.session_ids)
++            for session in self.sessions:
++                if session.project_id == project.id:
++                    in_proj.add(session.id)
+         return sorted(
+-            [s for s in self.sessions if s.id not in in_proj and s.project_id is None],

@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"/>
+<style>
+body{margin:0;background:#f5f5f7;font-family:-apple-system,"Noto Sans CJK SC",sans-serif;color:#1c1c1e}
+.shell{display:flex;width:1100px;height:700px;margin:0 auto;background:#fff;}
+.side{width:280px;background:#f5f5f7;border-right:1px solid #e5e5ea;padding:16px}
+.side .item{display:flex;gap:10px;align-items:center;padding:10px;border-radius:14px;margin:6px 0}
+.side .item.on{background:#e8e8ed}
+.side img.av{width:40px;height:40px}
+.main{flex:1;display:flex;flex-direction:column;background:#fafafa}
+.head{padding:14px 20px;border-bottom:1px solid #ebebef;font-weight:700}
+.chat{flex:1;padding:20px 28px;overflow:auto}
+.row{margin:14px 0;display:flex}
+.row.user{justify-content:flex-end}
+.row.agent{justify-content:flex-start}
+.row img.bub,.row img.rowimg{max-width:100%;height:auto;display:block}
+.tool{color:#8e8e93;font-size:13px;margin:8px 0 8px 56px}
+.composer{margin:12px 20px;padding:12px 16px;border-radius:22px;border:1px solid #d1d1d6;background:#fff;color:#8e8e93}
+</style></head><body>
+<div class="shell">
+  <div class="side">
+    <div style="font-weight:700;margin-bottom:12px">✨ LightAgent</div>
+    <div class="item on"><img class="av" src="soft_preview_assets/avatar.png"/><div><b>TUI 气泡样式</b><div style="color:#8e8e93;font-size:12px">当前会话</div></div></div>
+  </div>
+  <div class="main">
+    <div class="head">TUI 气泡样式</div>
+    <div class="chat">
+      <div class="row user"><img class="bub" src="soft_preview_assets/u0.png" alt=""/></div><div class="row agent"><img class="rowimg" src="soft_preview_assets/a1.png" alt=""/></div><div class="row agent"><img class="rowimg" src="soft_preview_assets/a2.png" alt=""/></div><div class="row user"><img class="bub" src="soft_preview_assets/u3.png" alt=""/></div><div class="row agent"><img class="rowimg" src="soft_preview_assets/a4.png" alt=""/></div>
+    </div>
+    <div class="composer">给 LightAgent 发消息…</div>
+  </div>
+</div>
+</body></html>

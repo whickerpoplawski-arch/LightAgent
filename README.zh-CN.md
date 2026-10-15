@@ -36,6 +36,7 @@
   <h1>LightAgent🚀 超轻量、可“成长”的智能体框架，现已原生支持Skill</h1>
 </div>
 
+本分叉在 `local/` 加了多对话身份：侧栏多个 Bot、每个对话一份你自己写的职位/职责、以及单层 `delegate_to_bot`。说明见 [`local/conversations/README.md`](local/conversations/README.md)。
 
 🚀 **LightAgent** 
 不再只是“聊天”，而是真正的“完成任务”。LightAgent 把记忆（`mem0`）、工具（`Tools`）、思维树（`ToT`）和多智能体协作融合进一个极简的包中，而你只需 **一行代码** 就能构建一个**能自我学习、按需加载Skill**的智能体 —— 就像给大模型装上“招式库”与“执行大脑”。

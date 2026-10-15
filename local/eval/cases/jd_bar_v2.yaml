@@ -1,0 +1,869 @@
+# JD 能力尺子测评集 v2 — 社区调研扩面后
+# 标签 bar ∈ {A,B,C,D,E}；相对 v1 加重：多约束/否定遵指、飞轮 stub 边界、单层≠递归 Swarm、跨 store/digest 卫生
+# 外部大榜（BFCL/GAIA/AssistantBench/WorkArena/LoCoMo…）本仓未整榜跑，见 research 对照表
+version: 2
+cases:
+  # ---- A 质量缺陷 ----
+  - id: JD-A01
+    bar: A
+    dim: intent
+    tier: jd
+    title: A4/A1 忌口指令 — absorb 后卡含海鲜
+    mode: store
+    store_action: absorb
+    turns:
+      - role: user
+        text: 忌口：海鲜
+    expect:
+      stores:
+        - check: constraint_contains
+          args: {needle: 海鲜}
+
+  - id: JD-A02
+    bar: A
+    dim: intent
+    tier: jd
+    title: A4 短问不建 goal（指令：别当成大计划）
+    mode: store
+    store_action: maybe_open_goal
+    turns:
+      - role: user
+        text: 今天吃什么
+    expect:
+      stores:
+        - check: should_not_create_goal
+        - check: no_active_goal
+
+  - id: JD-A03
+    bar: A
+    dim: tool
+    tier: jd
+    title: A3/A5 live 必须 get_weather（任务完成=调对工具）
+    mode: live_agent
+    turns:
+      - role: user
+        text: 请用天气工具查一下上海天气。
+    expect:
+      tools:
+        must: [get_weather]
+        forbid: []
+        extra: allow
+
+  - id: JD-A04
+    bar: A
+    dim: tool
+    tier: jd
+    title: A3/A4 live 明确禁止查网 — forbid web_*
+    mode: live_agent
+    turns:
+      - role: user
+        text: 随便聊聊今天累不累，不要查网，也不要记住任何内容。
+    expect:
+      tools:
+        must: []
+        forbid: [web_search, web_fetch, memory_learn]
+        extra: allow
+
+  - id: JD-A05
+    bar: A
+    dim: tool
+    tier: jd
+    title: A2/A5 live 双任务勿遗漏 — weather+search
+    mode: live_agent
+    turns:
+      - role: user
+        text: 请同时做两件事：查北京天气，并用网页搜索「清淡晚餐搭配」。两件都要完成。
+    expect:
+      tools:
+        must: [get_weather, web_search]
+        forbid: []
+        extra: allow
+
+  - id: JD-A06
+    bar: A
+    dim: tool
+    tier: jd
+    title: A3 live 指定 URL 须 web_fetch
+    mode: live_agent
+    turns:
+      - role: user
+        text: 请用网页抓取工具摘要 https://example.com ，不要用搜索。
+    expect:
+      tools:
+        must: [web_fetch]
+        forbid: []
+        extra: allow
+
+  - id: JD-A07
+    bar: A
+    dim: context
+    tier: jd
+    title: A1/A4 live 忌口后勿主推海鲜火锅
+    mode: live_agent
+    setup:
+      - absorb: 忌口：海鲜
+    turns:
+      - role: user
+        text: 推荐个海鲜火锅吧
+    expect:
+      stores:
+        - check: constraint_contains
+          args: {needle: 海鲜}
+      invariants:
+        - reply_avoid_seafood_primary
+
+  - id: JD-A08
+    bar: A
+    dim: intent
+    tier: jd
+    title: A4 单字海鲜不入卡（防误吸收）
+    mode: store
+    store_action: classify
+    turns:
+      - role: user
+        text: 海鲜
+    expect:
+      stores:
+        - check: classify_none
+
+  # ---- B Context 飞轮 / 自进化 ----
+  - id: JD-B01
+    bar: B
+    dim: context
+    tier: jd
+    title: B 改口 supersede — 经验可修正
+    mode: store
+    store_action: absorb
+    setup:
+      - absorb: 忌口：海鲜
+    turns:
+      - role: user
+        text: 其实可以吃虾
+    expect:
+      stores:
+        - check: constraint_superseded
+          args: {old_needle: 海鲜}
+
+  - id: JD-B02
+    bar: B
+    dim: context
+    tier: jd
+    title: B pin 耐久记忆「叫我小Q」
+    mode: store
+    store_action: sanitize
+    setup:
+      - memory_learn_pin: 叫我小Q
+    turns:
+      - role: user
+        text: (pin probe)
+    expect:
+      stores:
+        - check: memory_pinned_contains
+          args: {needle: 小Q}
+
+  - id: JD-B03
+    bar: B
+    dim: context
+    tier: jd
+    title: B consolidate job 仅入队（stub 不进化）— 架构探针
+    mode: store
+    store_action: enqueue_consolidate
+    turns:
+      - role: user
+        text: (enqueue consolidate)
+    expect:
+      stores:
+        - check: consolidate_job_queued_not_run
+
+  - id: JD-B04
+    bar: B
+    dim: context
+    tier: jd
+    title: B pack 永不污染 transcript（sanitize）
+    mode: store
+    store_action: sanitize
+    turns:
+      - role: user
+        text: (sanitize)
+    expect:
+      stores:
+        - check: sanitize_clean
+      invariants:
+        - no_memory_context_leak
+
+  - id: JD-B05
+    bar: B
+    dim: context
+    tier: jd
+    title: B 同义忌口写入 — 数据可累积
+    mode: store
+    store_action: absorb
+    turns:
+      - role: user
+        text: 别再给我花生
+    expect:
+      stores:
+        - check: constraint_contains
+          args: {needle: 花生}
+
+  - id: JD-B06
+    bar: B
+    dim: tool
+    tier: jd
+    title: B live 闲聊勿无故 memory_learn（防脏飞轮）
+    mode: live_agent
+    turns:
+      - role: user
+        text: 今天心情一般，陪我聊聊就行，不要记住，不要查网。
+    expect:
+      tools:
+        must: []
+        forbid: [memory_learn, web_search, web_fetch]
+        extra: allow
+
+  # ---- C 规划 / 工具 / 记忆 / 推理 ----
+  - id: JD-C01
+    bar: C
+    dim: decompose
+    tier: jd
+    title: C1 显式规划 → LifeGoal 恰 1 in_progress
+    mode: store
+    store_action: maybe_open_goal
+    turns:
+      - role: user
+        text: 帮我制定一周健身与饮食计划
+    expect:
+      stores:
+        - check: should_create_goal
+        - check: goal_one_in_progress
+
+  - id: JD-C02
+    bar: C
+    dim: decompose
+    tier: jd
+    title: C1/C4 口语推进步骤
+    mode: store
+    store_action: advance
+    setup:
+      - open_goal: 帮我制定一周健身与饮食计划
+    turns:
+      - role: user
+        text: 训练日定好了
+    expect:
+      stores:
+        - check: goal_advanced
+
+  - id: JD-C03
+    bar: C
+    dim: decompose
+    tier: jd
+    title: C4 插入天气不推进 goal（推理：无关话）
+    mode: store
+    store_action: advance
+    setup:
+      - open_goal: 帮我制定一周健身与饮食计划
+    turns:
+      - role: user
+        text: 今天天气呢
+    expect:
+      stores:
+        - check: goal_one_in_progress
+
+  - id: JD-C04
+    bar: C
+    dim: intent
+    tier: jd
+    title: C1 模糊「我想健身」不滥拆
+    mode: store
+    store_action: maybe_open_goal
+    turns:
+      - role: user
+        text: 我想健身
+    expect:
+      stores:
+        - check: should_not_create_goal
+
+  - id: JD-C05
+    bar: C
+    dim: tool
+    tier: jd
+    title: C2 live web_search 清淡饮食
+    mode: live_agent
+    turns:
+      - role: user
+        text: 请用网页搜索查一下清淡饮食建议，只要搜索摘要。
+    expect:
+      tools:
+        must: [web_search]
+        forbid: [memory_learn]
+        extra: allow
+
+  - id: JD-C06
+    bar: C
+    dim: intent
+    tier: jd
+    title: C 例程：每周一称重可解析且不跑
+    mode: store
+    store_action: parse_routine
+    create_if_parsed: true
+    turns:
+      - role: user
+        text: 每周一叫我称重
+    expect:
+      stores:
+        - check: parse_routine_weekly
+        - check: routine_created_not_run
+      invariants:
+        - routine_not_run
+
+  - id: JD-C07
+    bar: C
+    dim: intent
+    tier: jd
+    title: C 「提醒我一下」无 cadence 拒识
+    mode: store
+    store_action: parse_routine
+    turns:
+      - role: user
+        text: 提醒我一下
+    expect:
+      stores:
+        - check: parse_routine_none
+
+  - id: JD-C08
+    bar: C
+    dim: context
+    tier: jd
+    title: C3 规划+忌口同在 — 卡与 goal 并存
+    mode: store
+    store_action: maybe_open_goal
+    setup:
+      - absorb: 忌口：海鲜
+    turns:
+      - role: user
+        text: 帮我制定一周健身与饮食计划
+    expect:
+      stores:
+        - check: should_create_goal
+        - check: goal_one_in_progress
+        - check: constraint_contains
+          args: {needle: 海鲜}
+
+  # ---- D Multi-Agent ----
+  - id: JD-D01
+    bar: D
+    dim: intent
+    tier: jd
+    title: D 健身+饮食触发 template:fitness_diet
+    mode: store
+    store_action: room_plan
+    turns:
+      - role: user
+        text: 今日健身和饮食怎么安排
+    expect:
+      stores:
+        - check: room_plan_reason
+          args: {reason_prefix: "template:fitness_diet"}
+
+  - id: JD-D02
+    bar: D
+    dim: intent
+    tier: jd
+    title: D 单主题「只谈健身」不拉全屋 — host only
+    mode: store
+    store_action: room_plan
+    turns:
+      - role: user
+        text: 今天怎么健身
+    expect:
+      stores:
+        - check: room_plan_reason
+          args: {reason_prefix: "fallback_host_only"}
+
+  - id: JD-D03
+    bar: D
+    dim: intent
+    tier: jd
+    title: D @成员 优先 mention 选麦
+    mode: store
+    store_action: room_plan_mention
+    turns:
+      - role: user
+        text: "@习惯教练 今晚练什么"
+    expect:
+      stores:
+        - check: room_plan_reason
+          args: {reason_prefix: "mention"}
+
+  - id: JD-D04
+    bar: D
+    dim: context
+    tier: jd
+    title: D Host 三行含「下一步」（规则主持非 Swarm）
+    mode: store
+    store_action: host_summary
+    turns:
+      - role: user
+        text: (host summary)
+    expect:
+      stores:
+        - check: host_summary_has_next
+
+  - id: JD-D05
+    bar: D
+    dim: intent
+    tier: jd
+    title: D 闲聊 fallback_host_only（无递归拆解）
+    mode: store
+    store_action: room_plan
+    turns:
+      - role: user
+        text: 今天天气真好啊
+    expect:
+      stores:
+        - check: room_plan_reason
+          args: {reason_prefix: "fallback_host_only"}
+
+  - id: JD-D06
+    bar: D
+    dim: intent
+    tier: jd
+    title: D 显式「运动和饮食」触发模板
+    mode: store
+    store_action: room_plan
+    turns:
+      - role: user
+        text: 帮我看看运动和饮食
+    expect:
+      stores:
+        - check: room_plan_reason
+          args: {reason_prefix: "template:fitness_diet"}
+
+  # ---- E Long-horizon ----
+  - id: JD-E01
+    bar: E
+    dim: decompose
+    tier: jd
+    title: E cancel→resume 同 goal_id（抗遗忘进度）
+    mode: store
+    store_action: resume
+    setup:
+      - open_goal: 帮我制定一周健身与饮食计划
+      - cancel_goal: true
+    turns:
+      - role: user
+        text: 继续
+    expect:
+      stores:
+        - check: resume_same_goal
+
+  - id: JD-E02
+    bar: E
+    dim: context
+    tier: jd
+    title: E 例程确认后 runner 恰 1（门闩）
+    mode: store
+    store_action: confirm_routine
+    setup:
+      - create_routine: 每周一叫我称重
+    turns:
+      - role: user
+        text: 确认提醒
+    expect:
+      stores:
+        - check: routine_ran_once
+
+  - id: JD-E03
+    bar: E
+    dim: context
+    tier: jd
+    title: E 落盘无 memory-context 泄漏
+    mode: store
+    store_action: absorb
+    setup:
+      - absorb: 忌口：海鲜
+      - open_goal: 帮我制定一周健身与饮食计划
+    turns:
+      - role: user
+        text: 忌口：花生酱
+    expect:
+      stores:
+        - check: constraint_contains
+          args: {needle: 花生}
+      invariants:
+        - no_memory_context_leak
+
+  - id: JD-E04
+    bar: E
+    dim: context
+    tier: jd
+    title: E 跨轮忌口仍在卡（工作记忆外耐久约束）
+    mode: store
+    store_action: absorb
+    setup:
+      - absorb: 忌口：海鲜
+    turns:
+      - role: user
+        text: 忌口：乳糖
+    expect:
+      stores:
+        - check: constraint_contains
+          args: {needle: 海鲜}
+        - check: constraint_contains
+          args: {needle: 乳糖}
+
+  - id: JD-E05
+    bar: E
+    dim: tool
+    tier: jd
+    title: E live 短问不 memory_learn、不滥建（长程卫生）
+    mode: live_agent
+    turns:
+      - role: user
+        text: 今天吃什么好呢？简单建议即可。
+    expect:
+      tools:
+        must: []
+        forbid: [memory_learn]
+        extra: allow
+      invariants:
+        - no_new_goal
+
+  - id: JD-E06
+    bar: E
+    dim: context
+    tier: jd
+    title: E pin + sanitize 双不变量（多级存储卫生）
+    mode: store
+    store_action: sanitize
+    setup:
+      - memory_learn_pin: 叫我小Q
+      - absorb: 忌口：海鲜
+    turns:
+      - role: user
+        text: (pin+sanitize)
+    expect:
+      stores:
+        - check: memory_pinned_contains
+          args: {needle: 小Q}
+        - check: constraint_contains
+          args: {needle: 海鲜}
+        - check: sanitize_clean
+      invariants:
+        - no_memory_context_leak
+
+  # ---- A v2 更严事实/遗漏/遵指 ----
+  - id: JD-A09
+    bar: A
+    dim: intent
+    tier: jd
+    title: A2 多约束写入 — 海鲜+花生同在卡
+    mode: store
+    store_action: absorb
+    setup:
+      - absorb: 忌口：海鲜
+    turns:
+      - role: user
+        text: 忌口：花生
+    expect:
+      stores:
+        - check: constraint_contains_all
+          args: {needles: [海鲜, 花生]}
+
+  - id: JD-A10
+    bar: A
+    dim: context
+    tier: jd
+    title: A1/A4 live 双忌口后勿主推海鲜火锅
+    mode: live_agent
+    setup:
+      - absorb: 忌口：海鲜
+      - absorb: 忌口：花生
+    turns:
+      - role: user
+        text: 推荐个海鲜火锅吧，带花生酱碟也行
+    expect:
+      stores:
+        - check: constraint_contains_all
+          args: {needles: [海鲜, 花生]}
+      invariants:
+        - reply_avoid_seafood_primary
+
+  - id: JD-A11
+    bar: A
+    dim: tool
+    tier: jd
+    title: A3/A4 live 否定探针 — 禁止天气与搜索
+    mode: live_agent
+    turns:
+      - role: user
+        text: 随便聊聊休息，不要查天气，不要网页搜索，也不要记住任何内容。
+    expect:
+      tools:
+        must: []
+        forbid: [get_weather, web_search, web_fetch, memory_learn]
+        extra: allow
+
+  - id: JD-A12
+    bar: A
+    dim: intent
+    tier: jd
+    title: A4 改口后仍保留其它忌口（乳糖+海鲜→放开虾仍要乳糖）
+    mode: store
+    store_action: absorb
+    setup:
+      - absorb: 忌口：海鲜
+      - absorb: 忌口：乳糖
+    turns:
+      - role: user
+        text: 其实可以吃虾
+    expect:
+      stores:
+        - check: constraint_superseded
+          args: {old_needle: 海鲜}
+        - check: constraint_contains
+          args: {needle: 乳糖}
+
+  - id: JD-A13
+    bar: A
+    dim: tool
+    tier: jd
+    title: A5 live 三约束任务 — weather 必调且禁 memory_learn
+    mode: live_agent
+    turns:
+      - role: user
+        text: 只用天气工具查广州天气，不要搜索网页，也不要写入记忆。
+    expect:
+      tools:
+        must: [get_weather]
+        forbid: [web_search, web_fetch, memory_learn]
+        extra: allow
+
+  # ---- B v2 飞轮 stub 边界 ----
+  - id: JD-B07
+    bar: B
+    dim: context
+    tier: jd
+    title: B 有 pin 写入后 enqueue 仍 stub（应巩固而未巩固）
+    mode: store
+    store_action: enqueue_consolidate
+    setup:
+      - memory_learn_pin: 叫我小Q
+      - absorb: 忌口：海鲜
+    turns:
+      - role: user
+        text: (enqueue after writes)
+    expect:
+      stores:
+        - check: memory_pinned_contains
+          args: {needle: 小Q}
+        - check: constraint_contains
+          args: {needle: 海鲜}
+        - check: consolidate_job_queued_not_run
+
+  - id: JD-B08
+    bar: B
+    dim: context
+    tier: jd
+    title: B supersede+enqueue 仍无 consolidate 执行（非自进化）
+    mode: store
+    store_action: enqueue_consolidate
+    setup:
+      - absorb: 忌口：海鲜
+    turns:
+      - role: user
+        text: (enqueue after supersede path primed)
+    expect:
+      stores:
+        - check: consolidate_job_queued_not_run
+
+  # ---- C v2 规划拒滥拆 / 多工具 ----
+  - id: JD-C09
+    bar: C
+    dim: intent
+    tier: jd
+    title: C1 「帮我安排一下」过宽不建 goal
+    mode: store
+    store_action: maybe_open_goal
+    turns:
+      - role: user
+        text: 帮我安排一下
+    expect:
+      stores:
+        - check: should_not_create_goal
+        - check: no_active_goal
+
+  - id: JD-C10
+    bar: C
+    dim: tool
+    tier: jd
+    title: C2 live 天气任务禁无关 web_search
+    mode: live_agent
+    turns:
+      - role: user
+        text: 请只查上海天气，不要网页搜索，不要记忆。
+    expect:
+      tools:
+        must: [get_weather]
+        forbid: [web_search, memory_learn]
+        extra: allow
+
+  - id: JD-C11
+    bar: C
+    dim: decompose
+    tier: jd
+    title: C1/C4 推进后仍恰 1 in_progress
+    mode: store
+    store_action: advance
+    setup:
+      - open_goal: 帮我制定一周健身与饮食计划
+    turns:
+      - role: user
+        text: 训练日定好了
+    expect:
+      stores:
+        - check: goal_advanced
+        - check: goal_one_in_progress
+
+  # ---- D v2 单层 vs 递归边界（诚实） ----
+  - id: JD-D07
+    bar: D
+    dim: intent
+    tier: jd
+    title: D 复杂宏观目标无关键词 — host_only（无递归拆原子）
+    mode: store
+    store_action: room_plan
+    turns:
+      - role: user
+        text: 帮我统筹出差、报销、订会议室和给老板写周报
+    expect:
+      stores:
+        - check: room_plan_reason
+          args: {reason_prefix: "fallback_host_only"}
+        - check: no_recursive_swarm
+
+  - id: JD-D08
+    bar: D
+    dim: intent
+    tier: jd
+    title: D 模板触发时 speakers 有上限（非无限 Swarm）
+    mode: store
+    store_action: room_plan
+    turns:
+      - role: user
+        text: 今日健身和饮食怎么安排
+    expect:
+      stores:
+        - check: room_plan_reason
+          args: {reason_prefix: "template:fitness_diet"}
+        - check: room_speakers_at_most
+          args: {max: 2}
+        - check: no_recursive_swarm
+
+  - id: JD-D09
+    bar: D
+    dim: context
+    tier: jd
+    title: D digest 剥离 ephemeral（非共享全文 KB）
+    mode: store
+    store_action: sanitize
+    turns:
+      - role: user
+        text: (digest probe)
+    expect:
+      stores:
+        - check: digest_no_ephemeral
+
+  - id: JD-D10
+    bar: D
+    dim: intent
+    tier: jd
+    title: D 「计划旅行和预算」无 fitness_diet 模板 — host_only
+    mode: store
+    store_action: room_plan
+    turns:
+      - role: user
+        text: 帮我计划旅行和预算
+    expect:
+      stores:
+        - check: room_plan_reason
+          args: {reason_prefix: "fallback_host_only"}
+        - check: no_recursive_swarm
+
+  # ---- E v2 跨会话 / 多 store / 卫生 ----
+  - id: JD-E07
+    bar: E
+    dim: context
+    tier: jd
+    title: E 三 store 并存 — 忌口+goal+pin
+    mode: store
+    store_action: maybe_open_goal
+    setup:
+      - absorb: 忌口：海鲜
+      - memory_learn_pin: 叫我小Q
+    turns:
+      - role: user
+        text: 帮我制定一周健身与饮食计划
+    expect:
+      stores:
+        - check: should_create_goal
+        - check: goal_one_in_progress
+        - check: constraint_contains
+          args: {needle: 海鲜}
+        - check: memory_pinned_contains
+          args: {needle: 小Q}
+
+  - id: JD-E08
+    bar: E
+    dim: decompose
+    tier: jd
+    title: E cancel→resume 同 goal（长程进度抗遗忘，对照 LongMemEval 切片）
+    mode: store
+    store_action: resume
+    setup:
+      - open_goal: 帮我制定一周健身与饮食计划
+      - cancel_goal: true
+    turns:
+      - role: user
+        text: 继续
+    expect:
+      stores:
+        - check: resume_same_goal
+
+  - id: JD-E09
+    bar: E
+    dim: context
+    tier: jd
+    title: E digest 卫生 + 多忌口耐久（对照 LoCoMo 切片）
+    mode: store
+    store_action: absorb
+    setup:
+      - absorb: 忌口：海鲜
+      - absorb: 忌口：花生
+    turns:
+      - role: user
+        text: 忌口：乳糖
+    expect:
+      stores:
+        - check: constraint_contains_all
+          args: {needles: [海鲜, 花生, 乳糖]}
+        - check: digest_no_ephemeral
+      invariants:
+        - no_memory_context_leak
+
+  - id: JD-E10
+    bar: E
+    dim: tool
+    tier: jd
+    title: E live 办事短句不建 goal 不 memory_learn（非 WorkArena）
+    mode: live_agent
+    turns:
+      - role: user
+        text: 明天要出门，给个穿衣建议就行，别建计划，别记东西。
+    expect:
+      tools:
+        must: []
+        forbid: [memory_learn]
+        extra: allow
+      invariants:
+        - no_new_goal

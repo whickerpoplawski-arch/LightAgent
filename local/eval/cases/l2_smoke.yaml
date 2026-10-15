@@ -1,0 +1,126 @@
+# L2 smoke — 8 cases covering intent / decompose / tool / context
+version: 1
+cases:
+  - id: L2-I01
+    dim: intent
+    tier: l2
+    title: 短问「今天吃什么」不建 LifeGoal
+    mode: store
+    store_action: maybe_open_goal
+    turns:
+      - role: user
+        text: 今天吃什么
+    expect:
+      stores:
+        - check: should_not_create_goal
+        - check: no_active_goal
+      invariants:
+        - no_new_goal
+
+  - id: L2-I02
+    dim: intent
+    tier: l2
+    title: 「忌口：海鲜」写入 ConstraintCard
+    mode: store
+    store_action: absorb
+    turns:
+      - role: user
+        text: 忌口：海鲜
+    expect:
+      stores:
+        - check: constraint_contains
+          args: {needle: 海鲜}
+
+  - id: L2-D01
+    dim: decompose
+    tier: l2
+    title: 制定一周健身与饮食计划 → 建 goal 恰 1 in_progress
+    mode: store
+    store_action: maybe_open_goal
+    turns:
+      - role: user
+        text: 帮我制定一周健身与饮食计划
+    expect:
+      stores:
+        - check: should_create_goal
+        - check: goal_one_in_progress
+
+  - id: L2-D02
+    dim: decompose
+    tier: l2
+    title: 「训练日定好了」推进步骤
+    mode: store
+    store_action: advance
+    setup:
+      - open_goal: 帮我制定一周健身与饮食计划
+    turns:
+      - role: user
+        text: 训练日定好了
+    expect:
+      stores:
+        - check: goal_advanced
+
+  - id: L2-T01
+    dim: tool
+    tier: l2
+    title: 「上海天气」调用 get_weather
+    mode: live_agent
+    turns:
+      - role: user
+        text: 上海天气怎么样？请用天气工具查一下。
+    expect:
+      tools:
+        must: [get_weather]
+        forbid: []
+        extra: allow
+    notes: mock get_weather 返回固定晴 22°C
+
+  - id: L2-T02
+    dim: tool
+    tier: l2
+    title: 网页搜索清淡饮食；禁止无端 memory_learn
+    mode: live_agent
+    turns:
+      - role: user
+        text: 用网页搜索查一下清淡饮食建议，只要搜索结果摘要。
+    expect:
+      tools:
+        must: [web_search]
+        forbid: [memory_learn]
+        extra: allow
+
+  - id: L2-T03
+    dim: tool
+    tier: l2
+    title: 闲聊心情 — 拒调 web/memory_learn
+    mode: live_agent
+    turns:
+      - role: user
+        text: 随便聊聊心情，今天有点累，不用查网也不用记什么。
+    expect:
+      tools:
+        must: []
+        forbid: [web_search, web_fetch, memory_learn]
+        extra: allow
+
+  - id: L2-C01
+    dim: context
+    tier: l2
+    title: 先忌口海鲜，再问海鲜火锅 — 卡仍含海鲜；回复不主推海鲜
+    mode: live_agent
+    setup:
+      - absorb: 忌口：海鲜
+    turns:
+      - role: user
+        text: 推荐个海鲜火锅吧
+    expect:
+      stores:
+        - check: constraint_contains
+          args: {needle: 海鲜}
+      tools:
+        must: []
+        forbid: []
+        extra: allow
+      invariants:
+        - reply_avoid_seafood_primary
+    notes: 硬=card；软=回复 heuristic，踩雷则 PARTIAL

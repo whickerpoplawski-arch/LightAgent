@@ -1,0 +1,9 @@
+name: superpowers
+version: 7.0.0
+description: 'Core skills library: TDD, debugging, collaboration patterns, and proven
+  techniques'
+entrypoints:
+  skills: skills
+adapter: external-skills-wrapper
+upstream: https://github.com/obra/superpowers.git
+upstream_meta: .cursor-plugin/plugin.json

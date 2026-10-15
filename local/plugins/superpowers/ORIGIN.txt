@@ -1,0 +1,2 @@
+Adapted from https://github.com/obra/superpowers.git
+skills copied into this plugin wrapper
