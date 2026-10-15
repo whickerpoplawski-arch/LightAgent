@@ -155,6 +155,20 @@ def remember(card: ConstraintCard, text: str) -> ConstraintCard:
     return card
 
 
+def retire(card: ConstraintCard, item_id: str) -> ConstraintCard:
+    """Mark one active row superseded and keep it on the card."""
+    needle = (item_id or "").strip()
+    if not needle:
+        return card
+    now = _now()
+    for item in card.items:
+        if item.id == needle and item.status == "active":
+            item.status = "superseded"
+            item.updated_at = now
+            break
+    return card
+
+
 def supersede(card: ConstraintCard, *, old_id_or_text: str, new_text: str) -> ConstraintCard:
     """Mark the old active row superseded and keep only the new text injectable."""
     cleaned = (new_text or "").strip()

@@ -672,24 +672,44 @@ def _chk_host_summary_has_next(workspace, case, bag, last_text, args):
     return ok, f"summary={text[:120]!r}"
 
 
-def _chk_consolidate_job_queued_not_run(workspace, case, bag, last_text, args):
+def _chk_consolidate_observable(workspace, case, bag, last_text, args):
+    """Consolidate ran or recorded why this batch did not fold. Empty run_due is a failure."""
+    import json
+
     from local.memory.jobs import run_due
     from local.memory.store import get_store
 
     store = get_store()
     job_id = bag.get("consolidate_job_id")
-    due = run_due(store)
-    # stub must return empty list (no real consolidate)
-    if due:
-        return False, f"run_due unexpectedly processed {due}"
     if not job_id:
         return False, "no job_id enqueued"
-    return True, f"queued={job_id} run_due=[] (stub)"
+    due = run_due(store, workspace=workspace)
+    if not due:
+        return False, "run_due returned empty; consolidate was not observable"
+    item = next((row for row in due if row.get("job_id") == job_id), None)
+    if item is None:
+        return False, f"job {job_id} missing from {due}"
+    if item.get("status") not in ("done", "skipped"):
+        return False, f"status={item.get('status')} reason={item.get('reason')}"
+    if not item.get("reason") or not isinstance(item.get("diff"), dict):
+        return False, f"missing reason or diff: {item}"
+    saved = next((row for row in store.list_jobs() if row["id"] == job_id), None)
+    if saved is None:
+        return False, "job row missing"
+    if saved.get("status") == "queued":
+        return False, "job still queued"
+    payload = json.loads(saved["payload"])
+    user_id = str(saved.get("user_id") or payload.get("user_id") or "")
+    if not user_id:
+        return False, "missing life user_id"
+    if "diff" not in payload or "before" not in payload or "after" not in payload:
+        return False, "store payload has no before/after diff"
+    return True, f"status={item['status']} reason={item['reason']} user={user_id}"
 
 
 _STORE_CHECKS["room_plan_reason"] = _chk_room_plan_reason
 _STORE_CHECKS["host_summary_has_next"] = _chk_host_summary_has_next
-_STORE_CHECKS["consolidate_job_queued_not_run"] = _chk_consolidate_job_queued_not_run
+_STORE_CHECKS["consolidate_observable"] = _chk_consolidate_observable
 
 
 def _dispatch_room_and_jobs(workspace, case, bag, text, action):
@@ -726,7 +746,12 @@ def _dispatch_room_and_jobs(workspace, case, bag, text, action):
         from local.memory.store import get_store
 
         store = get_store()
-        bag["consolidate_job_id"] = enqueue(store, kind="consolidate", payload={"src": "jd_eval"})
+        bag["consolidate_job_id"] = enqueue(
+            store,
+            kind="consolidate",
+            payload={"src": "jd_eval"},
+            user_id="local-user",
+        )
 
 
 # Monkey-patch dispatch to call extra actions: wrap by extending at end of original function body.

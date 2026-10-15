@@ -227,12 +227,22 @@ def test_persona_file_is_not_the_profile_store(env):
     assert env.path.resolve() != (PERSONA_DIR / "SOUL.md").resolve()
 
 
-def test_consolidate_job_is_a_stub(env):
-    job_id = enqueue(env, "consolidate", {"reason": "p0"})
+def test_consolidate_job_is_observable(env, tmp_path):
+    """Rewritten with the consolidate implementation. An empty batch is a recorded skip."""
+    job_id = enqueue(env, "consolidate", {"reason": "p0"}, user_id="alice")
     assert job_id
-    assert run_due(env) == []
-    assert env.list_jobs()[0]["status"] == "queued"
-    assert env.list_learnings(user_id="alice", namespace="profile") == []
+    due = run_due(env, workspace=tmp_path)
+    assert due and due[0]["job_id"] == job_id
+    assert due[0]["status"] == "skipped"
+    assert due[0]["reason"] == "min_new_memories"
+    job = env.list_jobs()[0]
+    assert job["status"] == "skipped"
+    assert job["user_id"] == "alice"
+    payload = json.loads(job["payload"])
+    assert payload["user_id"] == "alice"
+    assert payload["diff"]["learnings"]["merged"] == []
+    assert payload["before"]["learnings"] == []
+    assert payload["after"]["learnings"] == []
 
 
 def test_second_turn_reuses_cached_pack(env, monkeypatch):

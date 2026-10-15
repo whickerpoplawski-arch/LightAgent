@@ -164,7 +164,7 @@ cases:
     bar: B
     dim: context
     tier: jd
-    title: B consolidate job 仅入队（stub 不进化）— 架构探针
+    title: B consolidate 入队后可观测（空批写明跳过）
     mode: store
     store_action: enqueue_consolidate
     turns:
@@ -172,7 +172,7 @@ cases:
         text: (enqueue consolidate)
     expect:
       stores:
-        - check: consolidate_job_queued_not_run
+        - check: consolidate_observable
 
   - id: JD-B04
     bar: B

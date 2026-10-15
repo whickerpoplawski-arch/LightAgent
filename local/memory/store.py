@@ -46,6 +46,12 @@ CREATE TABLE IF NOT EXISTS learnings (
 );
 CREATE INDEX IF NOT EXISTS idx_learnings_scope
     ON learnings (user_id, namespace, status);
+CREATE TABLE IF NOT EXISTS consolidate_runs (
+    user_id TEXT NOT NULL,
+    namespace TEXT NOT NULL,
+    last_done_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, namespace)
+);
 CREATE TABLE IF NOT EXISTS jobs (
     id TEXT PRIMARY KEY,
     kind TEXT NOT NULL,
@@ -96,10 +102,12 @@ class ProfileStore:
     def __init__(self, path: str | Path | None = None) -> None:
         self.path = Path(path) if path is not None else default_store_path()
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()
+        # Re-entrant so a consolidate pass can hold the lock across store calls.
+        self._lock = threading.RLock()
         self._policy = life_assistant_policy()
         with self._connect() as conn:
             conn.executescript(_SCHEMA)
+            self._ensure_job_columns(conn)
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, check_same_thread=False)
@@ -375,15 +383,130 @@ class ProfileStore:
                 return None
             return self._get_conn(conn, learning_id, user_id, namespace)
 
-    def enqueue_job(self, *, kind: str, payload: dict[str, Any]) -> str:
+    def _ensure_job_columns(self, conn: sqlite3.Connection) -> None:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+        if "user_id" not in cols:
+            conn.execute("ALTER TABLE jobs ADD COLUMN user_id TEXT NOT NULL DEFAULT ''")
+        if "updated_at" not in cols:
+            conn.execute("ALTER TABLE jobs ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''")
+
+    def enqueue_job(self, *, kind: str, payload: dict[str, Any], user_id: str) -> str:
+        scoped = str(user_id or "").strip()
+        if not scoped:
+            raise ValueError("life user_id is required")
         job_id = uuid.uuid4().hex[:12]
+        now = _now()
         with self._lock, self._connect() as conn:
             conn.execute(
-                "INSERT INTO jobs (id, kind, payload, status, created_at) VALUES (?, ?, ?, ?, ?)",
-                (job_id, kind, json.dumps(payload, ensure_ascii=False), "queued", _now()),
+                """
+                INSERT INTO jobs (id, kind, payload, status, created_at, user_id, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (job_id, kind, json.dumps(payload, ensure_ascii=False), "queued", now, scoped, now),
             )
             conn.commit()
         return job_id
+
+    def complete_job(self, job_id: str, *, status: str, payload: dict[str, Any], user_id: str) -> None:
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE jobs
+                SET status = ?, payload = ?, user_id = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (status, json.dumps(payload, ensure_ascii=False), user_id, _now(), job_id),
+            )
+            conn.commit()
+
+    def mark_learnings_superseded(
+        self,
+        links: list[dict[str, str]],
+        *,
+        user_id: str,
+        namespace: str,
+    ) -> int:
+        """Keep the row, but stop injecting it. Pinned text is never rewritten."""
+        now = _now()
+        changed = 0
+        with self._lock, self._connect() as conn:
+            for link in links:
+                learning_id = str(link.get("id") or "")
+                kept_id = str(link.get("kept_id") or "")
+                row = conn.execute(
+                    """
+                    SELECT evidence FROM learnings
+                    WHERE id = ? AND user_id = ? AND namespace = ? AND pinned = 0
+                      AND status = 'active' AND instr(text, '[PINNED]') = 0
+                    """,
+                    (learning_id, user_id, namespace),
+                ).fetchone()
+                if row is None:
+                    continue
+                previous = str(row["evidence"] or "")
+                note = f"superseded_by:{kept_id}" if kept_id else "superseded"
+                evidence = f"{previous}\n{note}".strip() if previous else note
+                cur = conn.execute(
+                    """
+                    UPDATE learnings
+                    SET status = 'superseded', injectable = 0, updated_at = ?, evidence = ?
+                    WHERE id = ? AND user_id = ? AND namespace = ? AND pinned = 0
+                      AND status = 'active' AND instr(text, '[PINNED]') = 0
+                    """,
+                    (now, evidence, learning_id, user_id, namespace),
+                )
+                changed += cur.rowcount
+            conn.commit()
+        return changed
+
+    def restore_learnings(self, snapshot: list[dict[str, Any]], *, user_id: str, namespace: str) -> None:
+        """Put snapshotted rows back. This does not insert or delete."""
+        with self._lock, self._connect() as conn:
+            for item in snapshot:
+                conn.execute(
+                    """
+                    UPDATE learnings
+                    SET status = ?, injectable = ?, confirmed = ?, needs_confirm = ?,
+                        pinned = ?, updated_at = ?, evidence = ?
+                    WHERE id = ? AND user_id = ? AND namespace = ?
+                    """,
+                    (
+                        item.get("status") or "active",
+                        int(bool(item.get("injectable"))),
+                        int(bool(item.get("confirmed", True))),
+                        int(bool(item.get("needs_confirm"))),
+                        int(bool(item.get("pinned"))),
+                        item.get("updated_at") or "",
+                        item.get("evidence"),
+                        item.get("id"),
+                        user_id,
+                        namespace,
+                    ),
+                )
+            conn.commit()
+
+    def last_consolidate_at(self, user_id: str, namespace: str) -> str:
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT last_done_at FROM consolidate_runs
+                WHERE user_id = ? AND namespace = ?
+                """,
+                (user_id, namespace),
+            ).fetchone()
+        return "" if row is None else str(row["last_done_at"] or "")
+
+    def record_consolidate(self, user_id: str, namespace: str, when: str) -> None:
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO consolidate_runs (user_id, namespace, last_done_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(user_id, namespace) DO UPDATE SET last_done_at = excluded.last_done_at
+                """,
+                (user_id, namespace, when),
+            )
+            conn.commit()
 
     def list_jobs(self) -> list[dict[str, Any]]:
         with self._lock, self._connect() as conn:
