@@ -54,6 +54,9 @@ def test_e8_fitness_turn_orders_user_coach_diet_host():
     assert host.count("\n") <= 4
     assert result.bubbles[1].content not in host
     assert result.bubbles[2].content not in host
+    assert result.bubbles[1].content[:80] not in host
+    assert result.bubbles[2].content[:80] not in host
+    assert host.count("帮我安排今日健身和饮食（忌深蹲，晚饭少油）") == 0
     diet = result.bubbles[2]
     assert "忌深蹲" in diet.content
     assert "<identity" not in diet.content
