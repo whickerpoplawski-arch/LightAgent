@@ -43,3 +43,16 @@
 | `room_speakers_at_most` | TurnPlan.speakers ≤ max |
 | `digest_no_ephemeral` | room digest 剥离 memory-context |
 | `no_recursive_swarm` | TurnPlan 无 children/sub_plans（单层边界） |
+
+## life_heuristics 新增 store checks
+
+离线启发式，不是 FACTS/RAGAS。`store_action: life_turn` 会 absorb、压前 flush、填 grounded 回复和禁止工具，**不**调用 `run_due`。
+
+| check | 含义 |
+| --- | --- |
+| `card_unchanged` | 本轮后 active 忌口与 setup 之后的快照相同 |
+| `active_excludes` / `active_count` | active 文本不含 needle，或条数等于 n |
+| `learning_contains` / `learning_absent` | 本轮 flush 后的画像文本 |
+| `tools_forbid` / `tools_allow` | 离线 `plan_tools`（别搜 / 别记），不跑 live |
+| `grounded_cites` / `grounded_omits` / `grounded_refuses` | 回复只引用 active 卡行 |
+| `inject_grounded` | 注入块含 needles、不含 absent，且含全部 active 行 |

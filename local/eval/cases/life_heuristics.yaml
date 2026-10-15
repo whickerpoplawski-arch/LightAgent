@@ -1,0 +1,542 @@
+# 生活助手启发式（L-P1-1）。store / 离线。不是 JD 达标，不上 FACTS/RAGAS。
+# live 不在本文件；要跑模型须另开 live runner，且本套件不依赖它。
+# 覆盖：ConstraintCard grounded、否定遵指（别记 / 别搜 / 别改忌口）、多约束。
+version: 1
+cases:
+  - id: LH-G01
+    dim: context
+    tier: life
+    title: 忌口写入卡并可注入
+    mode: store
+    store_action: life_turn
+    turns:
+      - role: user
+        text: 忌口：海鲜
+    expect:
+      stores:
+        - check: constraint_contains
+          args: {needle: 海鲜}
+        - check: learning_contains
+          args: {needle: 海鲜}
+        - check: inject_grounded
+          args: {needles: [海鲜]}
+        - check: grounded_cites
+          args: {needles: ["忌口：海鲜"]}
+
+  - id: LH-G02
+    dim: intent
+    tier: life
+    title: 单字海鲜不入卡也不进 learning
+    mode: store
+    store_action: life_turn
+    turns:
+      - role: user
+        text: 海鲜
+    expect:
+      stores:
+        - check: classify_none
+        - check: card_unchanged
+        - check: active_count
+          args: {n: 0}
+        - check: learning_absent
+          args: {needle: 海鲜}
+
+  - id: LH-G03
+    dim: intent
+    tier: life
+    title: 今天吃什么不建 goal
+    mode: store
+    store_action: maybe_open_goal
+    turns:
+      - role: user
+        text: 今天吃什么
+    expect:
+      stores:
+        - check: should_not_create_goal
+        - check: no_active_goal
+
+  - id: LH-G04
+    dim: context
+    tier: life
+    title: 推荐句拒绝卡上的海鲜且不编造乳糖
+    mode: store
+    store_action: life_turn
+    setup:
+      - absorb: 忌口：海鲜
+    turns:
+      - role: user
+        text: 推荐个海鲜火锅
+    expect:
+      stores:
+        - check: constraint_contains
+          args: {needle: 海鲜}
+        - check: grounded_cites
+          args: {needles: [海鲜]}
+        - check: grounded_refuses
+          args: {food: 海鲜}
+        - check: grounded_omits
+          args: {needles: [乳糖]}
+
+  - id: LH-G05
+    dim: context
+    tier: life
+    title: 改口后注入只引用 active 抬升句
+    mode: store
+    store_action: life_turn
+    setup:
+      - absorb: 忌口：海鲜
+    turns:
+      - role: user
+        text: 其实可以吃虾
+    expect:
+      stores:
+        - check: constraint_superseded
+          args: {old_needle: 海鲜}
+        - check: active_excludes
+          args: {needle: 海鲜}
+        - check: inject_grounded
+          args: {needles: [虾], absent: [海鲜]}
+        - check: grounded_cites
+          args: {needles: ["其实可以吃虾"]}
+        - check: grounded_omits
+          args: {needles: [海鲜]}
+
+  - id: LH-G06
+    dim: intent
+    tier: life
+    title: 疑问句不改卡
+    mode: store
+    store_action: life_turn
+    turns:
+      - role: user
+        text: 我海鲜过敏吗
+    expect:
+      stores:
+        - check: classify_none
+        - check: card_unchanged
+        - check: active_count
+          args: {n: 0}
+
+  - id: LH-G07
+    dim: intent
+    tier: life
+    title: 忘掉忌口后 active 为空
+    mode: store
+    store_action: life_turn
+    setup:
+      - absorb: 忌口：海鲜
+    turns:
+      - role: user
+        text: 忘掉忌口海鲜
+    expect:
+      stores:
+        - check: active_count
+          args: {n: 0}
+        - check: active_excludes
+          args: {needle: 海鲜}
+        - check: inject_grounded
+          args: {needles: [], absent: [海鲜]}
+
+  - id: LH-G08
+    dim: context
+    tier: life
+    title: 抬升海鲜后注入仍保留花生
+    mode: store
+    store_action: life_turn
+    setup:
+      - absorb: 忌口：海鲜
+      - absorb: 忌口：花生
+    turns:
+      - role: user
+        text: 其实可以吃虾
+    expect:
+      stores:
+        - check: constraint_contains
+          args: {needle: 花生}
+        - check: active_excludes
+          args: {needle: 海鲜}
+        - check: inject_grounded
+          args: {needles: [花生], absent: [海鲜]}
+        - check: grounded_cites
+          args: {needles: [花生, 虾]}
+
+  - id: LH-G09
+    dim: context
+    tier: life
+    title: 请记住素食写入 learning 且不编造忌口卡
+    mode: store
+    store_action: life_turn
+    turns:
+      - role: user
+        text: 请记住我素食
+    expect:
+      stores:
+        - check: classify_none
+        - check: card_unchanged
+        - check: learning_contains
+          args: {needle: 素食}
+        - check: grounded_omits
+          args: {needles: [乳糖, 花生]}
+
+  - id: LH-N01
+    dim: intent
+    tier: life
+    title: 别记花生过敏 — 不写卡也不写 learning
+    mode: store
+    store_action: life_turn
+    turns:
+      - role: user
+        text: 别记我花生过敏
+    expect:
+      stores:
+        - check: classify_none
+        - check: card_unchanged
+        - check: learning_absent
+          args: {needle: 花生}
+        - check: tools_forbid
+          args: {names: [memory_learn]}
+
+  - id: LH-N02
+    dim: intent
+    tier: life
+    title: 不要记住跑步 — 不写 learning
+    mode: store
+    store_action: life_turn
+    turns:
+      - role: user
+        text: 不要记住：我每天跑步
+    expect:
+      stores:
+        - check: card_unchanged
+        - check: learning_absent
+          args: {needle: 跑步}
+        - check: tools_forbid
+          args: {names: [memory_learn]}
+
+  - id: LH-N03
+    dim: tool
+    tier: life
+    title: 别搜清淡食谱 — 禁止 web_search 与 web_fetch
+    mode: store
+    store_action: life_turn
+    turns:
+      - role: user
+        text: 别搜网上的清淡食谱
+    expect:
+      stores:
+        - check: tools_forbid
+          args: {names: [web_search, web_fetch]}
+        - check: card_unchanged
+        - check: learning_absent
+          args: {needle: 食谱}
+        - check: no_active_goal
+
+  - id: LH-N04
+    dim: tool
+    tier: life
+    title: 不要查网的闲聊不建 goal
+    mode: store
+    store_action: life_turn
+    turns:
+      - role: user
+        text: 不要查网，随便聊聊
+    expect:
+      stores:
+        - check: tools_forbid
+          args: {names: [web_search, web_fetch]}
+        - check: card_unchanged
+        - check: no_active_goal
+
+  - id: LH-N05
+    dim: intent
+    tier: life
+    title: 别改忌口挡住「其实可以吃虾」
+    mode: store
+    store_action: life_turn
+    setup:
+      - absorb: 忌口：海鲜
+    turns:
+      - role: user
+        text: 别改忌口，其实可以吃虾
+    expect:
+      stores:
+        - check: card_unchanged
+        - check: constraint_contains
+          args: {needle: 海鲜}
+        - check: active_excludes
+          args: {needle: 其实可以吃虾}
+        - check: learning_absent
+          args: {needle: 虾}
+
+  - id: LH-N06
+    dim: intent
+    tier: life
+    title: 不要改我的忌口 — 花生行保持
+    mode: store
+    store_action: life_turn
+    setup:
+      - absorb: 忌口：花生
+    turns:
+      - role: user
+        text: 不要改我的忌口
+    expect:
+      stores:
+        - check: card_unchanged
+        - check: constraint_contains
+          args: {needle: 花生}
+        - check: active_count
+          args: {n: 1}
+
+  - id: LH-N07
+    dim: tool
+    tier: life
+    title: 别记也别搜乳糖 — 卡与工具一起拒绝
+    mode: store
+    store_action: life_turn
+    turns:
+      - role: user
+        text: 别记也别搜：忌口乳糖
+    expect:
+      stores:
+        - check: card_unchanged
+        - check: active_count
+          args: {n: 0}
+        - check: learning_absent
+          args: {needle: 乳糖}
+        - check: tools_forbid
+          args: {names: [memory_learn, web_search, web_fetch]}
+
+  - id: LH-N08
+    dim: intent
+    tier: life
+    title: 别改忌口也别记 — 海鲜不抬升
+    mode: store
+    store_action: life_turn
+    setup:
+      - absorb: 忌口：海鲜
+    turns:
+      - role: user
+        text: 别改忌口也别记：其实可以吃虾
+    expect:
+      stores:
+        - check: card_unchanged
+        - check: constraint_contains
+          args: {needle: 海鲜}
+        - check: learning_absent
+          args: {needle: 虾}
+        - check: tools_forbid
+          args: {names: [memory_learn]}
+
+  - id: LH-N09
+    dim: intent
+    tier: life
+    title: 别记住素食 — 「记住」子串不写 learning
+    mode: store
+    store_action: life_turn
+    turns:
+      - role: user
+        text: 别记住我素食
+    expect:
+      stores:
+        - check: card_unchanged
+        - check: learning_absent
+          args: {needle: 素食}
+        - check: tools_forbid
+          args: {names: [memory_learn]}
+
+  - id: LH-N10
+    dim: tool
+    tier: life
+    title: 别搜但仍记下香菜忌口
+    mode: store
+    store_action: life_turn
+    turns:
+      - role: user
+        text: 别搜，但记下忌口：香菜
+    expect:
+      stores:
+        - check: constraint_contains
+          args: {needle: 香菜}
+        - check: learning_contains
+          args: {needle: 香菜}
+        - check: tools_forbid
+          args: {names: [web_search, web_fetch]}
+        - check: tools_allow
+          args: {names: [memory_learn]}
+
+  - id: LH-M01
+    dim: context
+    tier: life
+    title: 海鲜与花生两条都在
+    mode: store
+    store_action: life_turn
+    setup:
+      - absorb: 忌口：海鲜
+    turns:
+      - role: user
+        text: 忌口：花生
+    expect:
+      stores:
+        - check: constraint_contains_all
+          args: {needles: [海鲜, 花生]}
+        - check: active_count
+          args: {n: 2}
+        - check: grounded_cites
+          args: {needles: [海鲜, 花生]}
+
+  - id: LH-M02
+    dim: context
+    tier: life
+    title: 海鲜花生乳糖三条都在
+    mode: store
+    store_action: life_turn
+    setup:
+      - absorb: 忌口：海鲜
+      - absorb: 忌口：花生
+    turns:
+      - role: user
+        text: 忌口：乳糖
+    expect:
+      stores:
+        - check: constraint_contains_all
+          args: {needles: [海鲜, 花生, 乳糖]}
+        - check: active_count
+          args: {n: 3}
+        - check: inject_grounded
+          args: {needles: [海鲜, 花生, 乳糖]}
+
+  - id: LH-M03
+    dim: context
+    tier: life
+    title: 放开虾后乳糖仍在
+    mode: store
+    store_action: life_turn
+    setup:
+      - absorb: 忌口：海鲜
+      - absorb: 忌口：乳糖
+    turns:
+      - role: user
+        text: 其实可以吃虾
+    expect:
+      stores:
+        - check: constraint_superseded
+          args: {old_needle: 海鲜}
+        - check: constraint_contains
+          args: {needle: 乳糖}
+        - check: active_excludes
+          args: {needle: 海鲜}
+        - check: grounded_cites
+          args: {needles: [乳糖, 虾]}
+
+  - id: LH-M04
+    dim: context
+    tier: life
+    title: 一句同时写入花生和香菜
+    mode: store
+    store_action: life_turn
+    turns:
+      - role: user
+        text: 忌口：花生和香菜
+    expect:
+      stores:
+        - check: constraint_contains_all
+          args: {needles: [花生, 香菜]}
+        - check: learning_contains
+          args: {needle: 花生}
+        - check: inject_grounded
+          args: {needles: [花生, 香菜]}
+
+  - id: LH-M05
+    dim: context
+    tier: life
+    title: 三约束推荐且别搜 — 回复只引用卡
+    mode: store
+    store_action: life_turn
+    setup:
+      - absorb: 忌口：海鲜
+      - absorb: 忌口：花生
+      - absorb: 忌口：乳糖
+    turns:
+      - role: user
+        text: 推荐晚餐，别搜
+    expect:
+      stores:
+        - check: constraint_contains_all
+          args: {needles: [海鲜, 花生, 乳糖]}
+        - check: grounded_cites
+          args: {needles: [海鲜, 花生, 乳糖]}
+        - check: grounded_omits
+          args: {needles: [芒果]}
+        - check: tools_forbid
+          args: {names: [web_search, web_fetch]}
+        - check: card_unchanged
+
+  - id: LH-M06
+    dim: intent
+    tier: life
+    title: 双忌口时别改忌口不抬升虾
+    mode: store
+    store_action: life_turn
+    setup:
+      - absorb: 忌口：海鲜
+      - absorb: 忌口：花生
+    turns:
+      - role: user
+        text: 别改忌口，其实可以吃虾
+    expect:
+      stores:
+        - check: card_unchanged
+        - check: constraint_contains_all
+          args: {needles: [海鲜, 花生]}
+        - check: active_count
+          args: {n: 2}
+
+  - id: LH-M07
+    dim: context
+    tier: life
+    title: 麸质酒精辣椒三条都在
+    mode: store
+    store_action: life_turn
+    setup:
+      - absorb: 忌口：麸质
+      - absorb: 忌口：酒精
+    turns:
+      - role: user
+        text: 忌口：辣椒
+    expect:
+      stores:
+        - check: constraint_contains_all
+          args: {needles: [麸质, 酒精, 辣椒]}
+        - check: active_count
+          args: {n: 3}
+        - check: grounded_cites
+          args: {needles: [麸质, 酒精, 辣椒]}
+
+  - id: LH-M08
+    dim: context
+    tier: life
+    title: 三约束下别搜且别改忌口 — 仍拒绝海鲜
+    mode: store
+    store_action: life_turn
+    setup:
+      - absorb: 忌口：海鲜
+      - absorb: 忌口：花生
+      - absorb: 忌口：乳糖
+    turns:
+      - role: user
+        text: 推荐个海鲜火锅，不要搜索，也别改忌口
+    expect:
+      stores:
+        - check: card_unchanged
+        - check: constraint_contains_all
+          args: {needles: [海鲜, 花生, 乳糖]}
+        - check: grounded_cites
+          args: {needles: [海鲜, 花生, 乳糖]}
+        - check: grounded_refuses
+          args: {food: 海鲜}
+        - check: grounded_omits
+          args: {needles: [芒果]}
+        - check: tools_forbid
+          args: {names: [web_search, web_fetch]}
+        - check: tools_allow
+          args: {names: [memory_learn]}

@@ -765,8 +765,14 @@ def dispatch_store_action(workspace: Path, case: dict, bag: dict[str, Any]) -> d
         if t.get("role") == "user":
             text = t.get("text") or ""
     action = str(case.get("store_action") or "auto")
+    if "card_before" not in bag:
+        bag["card_before"] = list(_active_texts(workspace))
     bag = _orig_dispatch(workspace, case, bag)
     _dispatch_room_and_jobs(workspace, case, bag, text, action)
+    if action == "life_turn":
+        from local.eval.life_turn import apply_life_turn
+
+        apply_life_turn(workspace, text, bag)
     bag["last_text"] = text
     return bag
 
@@ -842,3 +848,102 @@ _STORE_CHECKS["constraint_contains_all"] = _chk_constraint_contains_all
 _STORE_CHECKS["room_speakers_at_most"] = _chk_room_speakers_at_most
 _STORE_CHECKS["digest_no_ephemeral"] = _chk_digest_no_ephemeral
 _STORE_CHECKS["no_recursive_swarm"] = _chk_no_recursive_swarm
+
+
+def _chk_card_unchanged(workspace, case, bag, last_text, args):
+    before = list(bag.get("card_before") or [])
+    after = _active_texts(workspace)
+    return before == after, f"before={before} after={after}"
+
+
+def _chk_active_excludes(workspace, case, bag, last_text, args):
+    needle = str(args.get("needle") or "")
+    texts = _active_texts(workspace)
+    hit = [text for text in texts if needle and needle in text]
+    return (not hit), f"hit={hit} active={texts}"
+
+
+def _chk_active_count(workspace, case, bag, last_text, args):
+    found = len(_active_texts(workspace))
+    want = int(args.get("n") if args.get("n") is not None else 0)
+    return found == want, f"n={found} want={want}"
+
+
+def _learning_texts(bag) -> list[str]:
+    return [str(text) for text in (bag.get("learning_texts") or [])]
+
+
+def _chk_learning_contains(workspace, case, bag, last_text, args):
+    needle = str(args.get("needle") or "")
+    texts = _learning_texts(bag)
+    ok = bool(needle) and any(needle in text for text in texts)
+    return ok, f"texts={texts[:6]}"
+
+
+def _chk_learning_absent(workspace, case, bag, last_text, args):
+    needle = str(args.get("needle") or "")
+    texts = _learning_texts(bag)
+    hit = [text for text in texts if needle and needle in text]
+    return (not hit), f"hit={hit}"
+
+
+def _chk_tools_forbid(workspace, case, bag, last_text, args):
+    names = list(args.get("names") or [])
+    forbid = set(bag.get("forbid_tools") or [])
+    missing = [name for name in names if name not in forbid]
+    return (not missing), f"forbid={sorted(forbid)} missing={missing}"
+
+
+def _chk_tools_allow(workspace, case, bag, last_text, args):
+    names = list(args.get("names") or [])
+    forbid = set(bag.get("forbid_tools") or [])
+    blocked = [name for name in names if name in forbid]
+    return (not blocked), f"forbid={sorted(forbid)} blocked={blocked}"
+
+
+def _chk_grounded_cites(workspace, case, bag, last_text, args):
+    reply = str(bag.get("grounded_reply") or "")
+    needles = list(args.get("needles") or _active_texts(workspace))
+    missing = [needle for needle in needles if str(needle) not in reply]
+    return (not missing), f"missing={missing} reply={reply[:180]}"
+
+
+def _chk_grounded_omits(workspace, case, bag, last_text, args):
+    reply = str(bag.get("grounded_reply") or "")
+    needles = list(args.get("needles") or [])
+    hit = [needle for needle in needles if str(needle) in reply]
+    return (not hit), f"hit={hit} reply={reply[:180]}"
+
+
+def _chk_grounded_refuses(workspace, case, bag, last_text, args):
+    food = str(args.get("food") or "")
+    reply = str(bag.get("grounded_reply") or "")
+    ok = bool(food) and f"不推荐{food}" in reply
+    return ok, f"reply={reply[:180]}"
+
+
+def _chk_inject_grounded(workspace, case, bag, last_text, args):
+    from local.constraints.card import load_constraint_block
+
+    block = str(bag.get("inject_block") or load_constraint_block(workspace))
+    needles = [str(item) for item in (args.get("needles") or [])]
+    absent = [str(item) for item in (args.get("absent") or [])]
+    active = _active_texts(workspace)
+    missing = [needle for needle in needles if needle not in block]
+    leaked = [needle for needle in absent if needle in block]
+    missing_active = [text for text in active if text not in block]
+    ok = not missing and not leaked and not missing_active
+    return ok, f"missing={missing} leaked={leaked} missing_active={missing_active} block={block[:180]}"
+
+
+_STORE_CHECKS["card_unchanged"] = _chk_card_unchanged
+_STORE_CHECKS["active_excludes"] = _chk_active_excludes
+_STORE_CHECKS["active_count"] = _chk_active_count
+_STORE_CHECKS["learning_contains"] = _chk_learning_contains
+_STORE_CHECKS["learning_absent"] = _chk_learning_absent
+_STORE_CHECKS["tools_forbid"] = _chk_tools_forbid
+_STORE_CHECKS["tools_allow"] = _chk_tools_allow
+_STORE_CHECKS["grounded_cites"] = _chk_grounded_cites
+_STORE_CHECKS["grounded_omits"] = _chk_grounded_omits
+_STORE_CHECKS["grounded_refuses"] = _chk_grounded_refuses
+_STORE_CHECKS["inject_grounded"] = _chk_inject_grounded

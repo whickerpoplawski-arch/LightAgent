@@ -197,6 +197,18 @@ class RoutineStore:
         path.unlink()
         return True
 
+    def find_open_duplicate(self, *, instruction: str, cadence: str, owner_space: str) -> Routine | None:
+        """Same instruction, cadence, and space. Paused rows do not count."""
+        norm = " ".join((instruction or "").split())
+        if not norm:
+            return None
+        for item in self.list_routines():
+            if item.paused or item.cadence != cadence or item.owner_space != owner_space:
+                continue
+            if " ".join(item.instruction.split()) == norm:
+                return item
+        return None
+
     def set_next_due(self, routine_id: str, when: datetime) -> Routine | None:
         routine = self.load(routine_id)
         if routine is None:

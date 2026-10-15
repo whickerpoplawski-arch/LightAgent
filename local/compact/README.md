@@ -2,6 +2,8 @@
 
 Compact 只管「这一会话还看得见什么」。跨会话要记住的事进 Memory。可复用的步骤经确认后写成 LightAgent skill。
 
+忌口卡由 1:1 的 `absorb_user_text` 写入；压前 `memory_flush` 写 learning、日笔记或 pin；`run_due` 只巩固已落库的行，flush 不调用也不代替它。
+
 默认摘要器是本地模板填充，**不调用 OpenRouter**。单测同样不联网。
 
 ## 怎么用
