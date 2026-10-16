@@ -1,5 +1,13 @@
 
 > 本工作区在 LightAgent 上加了个人生活助手的 P0 用户画像。记忆包只注入当次请求的 system 侧，不写回用户消息。用法和测试见 `local/memory/README.md`。`python -m pytest local/memory/tests -q` 不调用 OpenRouter。
+>
+> **生活助手 TUI 启动**（默认 MX · `deepseek-v4.1-flash` · `reasoning_effort=medium`；推荐 kitty 看真图气泡）：
+> ```bash
+> export MX_API_KEY=...
+> ./local/run_tui.sh          # 真对话
+> ./local/run_tui.sh --mock   # 不调 API
+> ```
+> 详解、快捷键、图片样式说明见 [`local/tui/README.md`](local/tui/README.md)。
 
 ![LightAgent Banner](docs/images/lightagent-banner.jpg)
 <div align="center">

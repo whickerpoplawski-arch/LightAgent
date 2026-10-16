@@ -19,7 +19,7 @@ local/tui/
 
 ## 运行
 
-日常默认走 **MX**（`deepseek-v4.1-flash`，`reasoning_effort=low`）。
+日常默认走 **MX**（`deepseek-v4.1-flash`，`reasoning_effort=medium`）。
 
 ```bash
 cd /workspace/LightAgent
@@ -30,7 +30,7 @@ export MX_API_KEY=...   # 或 OPENAI_API_KEY
 # halfcell / unicode 马赛克不算图片样式验收通过。
 ./local/run_tui.sh
 
-# 等价：模块启动（未 --mock 时自动设 PROVIDER=mx / ALLOW / effort=low）
+# 等价：模块启动（未 --mock 时自动设 PROVIDER=mx / ALLOW / effort=medium）
 env -u NO_COLOR PYTHONPATH=. /workspace/la-venv/bin/python -m local.tui.app
 
 # mock：不调 API（截图 / 调 UI）
