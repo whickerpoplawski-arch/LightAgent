@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -17,6 +16,8 @@ from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.geometry import Offset
+from textual.screen import Screen
 from textual.widgets import Input, Label, ListItem, ListView, Markdown, Static, TabbedContent, TabPane
 
 from local.conversations.context_menu import (
@@ -31,7 +32,17 @@ from local.conversations.models import BotIdentity, ConversationMeta, ProjectGro
 from local.conversations.store import StoredWorkspace, Transcript, load_workspace, save_workspace
 from local.memory.host import MemoryHost, bind_host
 from local.memory.tui_panel import MemoryPanel
+from local.tui.preview_text import latest_message_text, message_preview
 from local.tui.projects import Project, touch
+from local.tui.row_menu import (
+    LightAgentScreen,
+    MenuAction,
+    RowContextMenu,
+    TitleInput,
+    begin_title_edit,
+    end_title_edit,
+    is_right_button,
+)
 from local.tui.trace import (
     LANE_COLOR,
     LANE_LABEL,
@@ -175,11 +186,13 @@ class Session:
             self.space_id = self.project_id
 
     @property
+    def latest_plain(self) -> str:
+        """Untruncated latest user/agent text. Search uses this, not the 15-grapheme line."""
+        return latest_message_text(self.events)
+
+    @property
     def preview(self) -> str:
-        for kind, text in reversed(self.events):
-            if kind in ("user", "agent"):
-                return re.sub(r"[*_`#>|]", "", text).replace("\n", " ")[:36]
-        return "还没有消息 · 点这里开始"
+        return message_preview(self.latest_plain)
 
 
 class SessionRow(Horizontal):
@@ -203,8 +216,8 @@ class SessionRow(Horizontal):
         return f"{prefix}{self.session.title}"
 
     def _subtitle(self) -> str:
-        """副标题用短 avatar_id，窄侧栏里也能读，不留空白。"""
-        return self.session.avatar or "blue_drop"
+        """名称下是最新消息，约 15 字素。头像 id 只出现在顶栏。"""
+        return self.session.preview
 
     def compose(self) -> ComposeResult:
         yield GraphicsImage(self._cap_image(SIDEBAR_RGBA, right=False), classes="row-cap row-cap-left")
@@ -278,16 +291,26 @@ class SessionRow(Horizontal):
         self._sync_flags()
         self._sync_plate(force=True)
 
-    def on_click(self) -> None:
+    def on_click(self, event=None) -> None:
+        if event is not None and is_right_button(event):
+            event.stop()
+            return
         app = self.app
-        if isinstance(app, LightAgentTUI):
-            app.select_session(self.session)
+        if not isinstance(app, LightAgentTUI):
+            return
+        if app._rename_locked or getattr(self, "_renaming", False):
+            if event is not None:
+                event.stop()
+            return
+        app.select_session(self.session)
 
     def on_key(self, event) -> None:
         app = self.app
         if not isinstance(app, LightAgentTUI):
             return
-        if event.key in ("colon", "m"):
+        if app._rename_locked or getattr(self, "_renaming", False):
+            return
+        if event.key in ("colon", "m", ":"):
             app.open_session_menu(self.session)
             event.stop()
             event.prevent_default()
@@ -297,13 +320,16 @@ class SessionRow(Horizontal):
             event.prevent_default()
 
     def on_mouse_down(self, event) -> None:
-        button = getattr(event, "button", 1)
-        value = getattr(button, "value", button)
-        if value == 3 or str(button).lower().endswith("right"):
-            app = self.app
-            if isinstance(app, LightAgentTUI):
-                app.open_session_menu(self.session)
-                event.stop()
+        if not is_right_button(event):
+            return
+        app = self.app
+        if not isinstance(app, LightAgentTUI):
+            return
+        if app._rename_locked or getattr(self, "_renaming", False):
+            event.stop()
+            return
+        app.open_session_menu(self.session, from_mouse=True)
+        event.stop()
 
 
 class ProjectRow(Vertical):
@@ -719,8 +745,44 @@ class LightAgentTUI(App):
         self.room_messages: dict[str, list] = {}
         self.room_traces: dict[str, dict] = {}
         self.current_room_id: str | None = None
+        self._rename_locked = False
+        self._rename_row = None
+        self._rename_kind: str | None = None
+        self._rename_target_id: str | None = None
+        self._menu_callback = None
+        self._menu_anchor = None
+        self._menu_swallow_click = False
+        self._suppress_menu_click = False
         if self._persist:
             self._load_rooms()
+
+    _LOCKED_WHILE_RENAMING = frozenset(
+        {
+            "new_session",
+            "new_project",
+            "focus_search",
+            "clear",
+            "tab_chat",
+            "tab_trace",
+            "tab_memory",
+            "toggle_context",
+            "focus_trace_search",
+            "jump_trace_to_chat",
+            "open_settings",
+            "edit_identity",
+            "stop_run",
+            "quit",
+            "help_quit",
+        }
+    )
+
+    def get_default_screen(self) -> Screen:
+        return LightAgentScreen(id="_default")
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if self._rename_locked and action in self._LOCKED_WHILE_RENAMING:
+            return False
+        return True
 
     # ---------- 布局 ----------
     def compose(self) -> ComposeResult:
@@ -793,6 +855,7 @@ class LightAgentTUI(App):
                             id="pct-wrap",
                             click_target_id="ctx-pct",
                         )
+        yield RowContextMenu(id="row-menu")
 
     def on_mount(self) -> None:
         self.theme = "textual-light"
@@ -934,6 +997,11 @@ class LightAgentTUI(App):
     def rebuild_nav(self) -> None:
         from local.rooms.ui import RoomRow, room_preview
 
+        if self._rename_locked:
+            self._clear_rename_lock()
+        if self._menu_is_open():
+            self._hide_menu()
+
         pinned_box = self.query_one("#pinned-list", Vertical)
         project_box = self.query_one("#project-list", Vertical)
         ungrouped_box = self.query_one("#ungrouped-list", Vertical)
@@ -955,7 +1023,8 @@ class LightAgentTUI(App):
             if not query:
                 return True
             blob = (session.avatar or "").lower()
-            return query in session.title.lower() or query in session.preview.lower() or query in blob
+            haystack = f"{session.title}\n{session.latest_plain}\n{blob}".lower()
+            return query in haystack
 
         pinned = [by_id[meta.id] for meta in sections["pinned"] if meta.id in by_id and matches(by_id[meta.id])]
         self.query_one("#pinned-section", Label).display = bool(pinned)
@@ -995,6 +1064,8 @@ class LightAgentTUI(App):
             row._sync_plate(force=True)
 
     def select_session(self, session: Session) -> None:
+        if self._rename_locked:
+            return
         self.current = session
         if session.unread:
             self._mutate(session, "mark_read")
@@ -1815,6 +1886,8 @@ class LightAgentTUI(App):
         return None
 
     def on_click(self, event) -> None:
+        if self._rename_locked:
+            return
         wid = self._clicked_id(event.widget)
         if wid == "new-btn":
             self.new_session_in_project(None)
@@ -1896,6 +1969,8 @@ class LightAgentTUI(App):
         self.open_room(room.id)
 
     def open_room(self, room_id: str) -> None:
+        if self._rename_locked:
+            return
         room = next((item for item in self.rooms if item.id == room_id), None)
         if room is None:
             return
@@ -2018,10 +2093,316 @@ class LightAgentTUI(App):
         self.rebuild_nav()
         self._save_rooms()
 
-    def open_room_menu(self, room_id: str) -> None:
-        from local.rooms.ui import RoomMenuScreen
+    def consume_blocked_pointer(self, event) -> bool:
+        """Swallow pointer events that would dismiss a just-opened menu or switch sessions mid-rename.
 
-        self.push_screen(RoomMenuScreen(), lambda action: self._on_room_menu(room_id, action))
+        Pilot and the real driver both enter through ``Screen._forward_event``.
+        A right-click is MouseDown plus a later MouseUp/Click on the row; that
+        trailing click must not close the menu it just opened. An outside press
+        closes the menu and eats the rest of that gesture so the row underneath
+        is not selected. Rename only accepts Enter and Esc.
+        """
+        from textual.events import Click, MouseDown, MouseUp
+
+        if not isinstance(event, (MouseDown, MouseUp, Click)):
+            return False
+        if self._rename_locked:
+            return not self._pointer_on_rename_field(event)
+
+        if isinstance(event, MouseDown):
+            self._suppress_menu_click = False
+            self._menu_swallow_click = False
+            if self._menu_is_open() and not self._pointer_on_menu(event):
+                if is_right_button(event):
+                    self._hide_menu()
+                    return False
+                self.dismiss_row_menu()
+                self._menu_swallow_click = True
+                return True
+            return False
+
+        if self._suppress_menu_click or self._menu_swallow_click:
+            if isinstance(event, Click):
+                self._suppress_menu_click = False
+                self._menu_swallow_click = False
+            return True
+        if self._menu_is_open() and isinstance(event, Click) and not self._pointer_on_menu(event):
+            self.dismiss_row_menu()
+            return True
+        return False
+
+    def _event_xy(self, event) -> tuple[int, int] | None:
+        try:
+            return int(event.x), int(event.y)
+        except Exception:
+            return None
+
+    def _pointer_widget(self, event):
+        xy = self._event_xy(event)
+        if xy is None:
+            return None
+        try:
+            widget, _region = self.screen.get_widget_at(*xy)
+        except Exception:
+            return None
+        return widget
+
+    def _pointer_inside(self, widget, event) -> bool:
+        if widget is None:
+            return False
+        target = self._pointer_widget(event)
+        if target is None:
+            return False
+        if target is widget:
+            return True
+        return widget in getattr(target, "ancestors", ())
+
+    def _row_menu(self) -> RowContextMenu | None:
+        try:
+            return self.query_one("#row-menu", RowContextMenu)
+        except Exception:
+            return None
+
+    def _menu_is_open(self) -> bool:
+        menu = self._row_menu()
+        return bool(menu is not None and menu.display)
+
+    def _pointer_on_menu(self, event) -> bool:
+        menu = self._row_menu()
+        if menu is None or not menu.display:
+            return False
+        return self._pointer_inside(menu, event)
+
+    def _rename_field(self) -> TitleInput | None:
+        row = self._rename_row
+        if row is None:
+            return None
+        try:
+            return row.query_one(TitleInput)
+        except Exception:
+            return None
+
+    def _pointer_on_rename_field(self, event) -> bool:
+        return self._pointer_inside(self._rename_field(), event)
+
+    def _session_row(self, session: Session):
+        for row in self.query(SessionRow):
+            if row.session.id == session.id and not row._pruning:
+                return row
+        return None
+
+    def _focus_session_row(self, session: Session) -> None:
+        row = self._session_row(session)
+        if row is not None:
+            row.focus()
+
+    def _focus_room_row(self, room_id: str) -> None:
+        from local.rooms.ui import RoomRow
+
+        row = next((item for item in self.query(RoomRow) if item.room_id == room_id and not item._pruning), None)
+        if row is not None:
+            row.focus()
+
+    def open_row_menu(self, anchor, entries, callback, *, from_mouse: bool = False) -> None:
+        if self._rename_locked or anchor is None:
+            return
+        menu = self._row_menu()
+        if menu is None:
+            return
+        self._menu_callback = callback
+        self._menu_anchor = anchor
+        self._suppress_menu_click = bool(from_mouse)
+        menu.show_entries(entries)
+        self._place_menu(menu, anchor)
+        self.call_after_refresh(self._settle_menu)
+
+    def _menu_offset(self, anchor) -> Offset:
+        try:
+            main = self.query_one("#main")
+            x = max(0, main.region.x - 4)
+        except Exception:
+            x = max(0, anchor.region.x)
+        return Offset(x, max(0, anchor.region.y))
+
+    def _clamp_offset(self, offset: Offset, menu: RowContextMenu) -> Offset:
+        width = menu.region.width
+        height = menu.region.height
+        if width <= 0 or height <= 0:
+            return offset
+        size = self.screen.size
+        x, y = offset.x, offset.y
+        if x + width > size.width:
+            x = max(0, size.width - width)
+        if y + height > size.height:
+            y = max(0, size.height - height)
+        return Offset(x, y)
+
+    def _place_menu(self, menu: RowContextMenu, anchor) -> None:
+        menu.absolute_offset = self._clamp_offset(self._menu_offset(anchor), menu)
+        menu.refresh(layout=True)
+
+    def _sync_open_menu(self) -> None:
+        menu = self._row_menu()
+        anchor = self._menu_anchor
+        if menu is None or not menu.display or anchor is None:
+            return
+        try:
+            if not anchor.is_attached or anchor._pruning:
+                return
+        except Exception:
+            return
+        desired = self._clamp_offset(self._menu_offset(anchor), menu)
+        if menu.absolute_offset == desired:
+            return
+        menu.absolute_offset = desired
+        menu.refresh(layout=True)
+
+    def _settle_menu(self, *, retry: bool = True) -> None:
+        menu = self._row_menu()
+        anchor = self._menu_anchor
+        if menu is None or not menu.display or anchor is None:
+            return
+        try:
+            if not anchor.is_attached or anchor._pruning:
+                return
+        except Exception:
+            return
+        # Shell margin lands a frame after mount. Place again once layout has caught up.
+        self._place_menu(menu, anchor)
+        actions = [item for item in menu.query(MenuAction) if not item._pruning]
+        if retry:
+            self.call_after_refresh(lambda: self._settle_menu(retry=False))
+            return
+        self._clamp_menu(menu)
+        if actions and not any(item.has_focus for item in actions):
+            actions[0].focus(False)
+
+    def _clamp_menu(self, menu: RowContextMenu) -> None:
+        anchor = self._menu_anchor
+        if anchor is None:
+            return
+        self._place_menu(menu, anchor)
+
+    def _hide_menu(self) -> None:
+        self._menu_callback = None
+        self._menu_anchor = None
+        menu = self._row_menu()
+        if menu is not None:
+            menu.hide()
+
+    def dismiss_row_menu(self) -> None:
+        anchor = self._menu_anchor
+        self._hide_menu()
+        if anchor is not None:
+            try:
+                if anchor.is_attached and not anchor._pruning:
+                    anchor.focus()
+            except Exception:
+                pass
+
+    def pick_row_menu(self, action_id: str) -> None:
+        callback = self._menu_callback
+        self._hide_menu()
+        if callback is not None:
+            callback(action_id)
+
+    def _start_rename(self, row, kind: str, target_id: str, title: str) -> None:
+        if self._rename_locked or row is None:
+            return
+        self._rename_locked = True
+        self._rename_kind = kind
+        self._rename_target_id = target_id
+        self._rename_row = row
+        try:
+            begin_title_edit(row, title)
+        except Exception:
+            self._clear_rename_lock()
+            raise
+
+    def _clear_rename_lock(self) -> None:
+        row = self._rename_row
+        self._rename_locked = False
+        self._rename_row = None
+        self._rename_kind = None
+        self._rename_target_id = None
+        if row is not None:
+            end_title_edit(row)
+
+    def cancel_title_edit(self) -> None:
+        row = self._rename_row
+        self._clear_rename_lock()
+        if row is not None:
+            try:
+                if row.is_attached and not row._pruning:
+                    row.focus(False)
+            except Exception:
+                pass
+
+    def commit_title_edit(self, raw: str) -> None:
+        title = (raw or "").strip()
+        if not title:
+            self.notify("名称不能为空")
+            field = self._rename_field()
+            if field is not None:
+                field.focus()
+                field.select_all()
+            return
+        kind = self._rename_kind
+        target_id = self._rename_target_id
+        self._clear_rename_lock()
+        if kind == "session":
+            session = next((item for item in self.sessions if item.id == target_id), None)
+            if session is None:
+                return
+            previous = session.id
+            result, _ws = self._mutate(session, "rename", title=title)
+            if not result.ok:
+                self.notify(result.message)
+                return
+            if session.id != previous:
+                self.notify("重命名不应改变 id")
+            self.rebuild_nav()
+            if self.current.id == session.id:
+                self.load_session(self.current)
+            self._focus_session_row(session)
+            return
+        if kind == "room":
+            from local.rooms.actions import RoomError, rename_room
+
+            room = next((item for item in self.rooms if item.id == target_id), None)
+            if room is None:
+                return
+            try:
+                rename_room(room, title)
+            except RoomError as exc:
+                self.notify(str(exc))
+                return
+            self.rebuild_nav()
+            if self.current_room_id == room.id:
+                self.load_room(room)
+            self._save_rooms()
+            self._focus_room_row(room.id)
+
+    def open_room_menu(self, room_id: str, *, from_mouse: bool = False) -> None:
+        from local.conversations.context_menu import MenuEntry
+        from local.rooms.ui import RoomRow
+
+        if self._rename_locked:
+            return
+        row = next((item for item in self.query(RoomRow) if item.room_id == room_id), None)
+        if row is None:
+            return
+        entries = [
+            MenuEntry("rename", "重命名群"),
+            MenuEntry("members", "管理成员"),
+            MenuEntry("delete", "删除群"),
+        ]
+        self.open_row_menu(
+            row,
+            entries,
+            lambda action: self._on_room_menu(room_id, action),
+            from_mouse=from_mouse,
+        )
 
     def _on_room_menu(self, room_id: str, action: str | None) -> None:
         if not action:
@@ -2037,23 +2418,12 @@ class LightAgentTUI(App):
             self._confirm_delete_room(room)
 
     def _rename_room(self, room) -> None:
-        from local.rooms.actions import RoomError, rename_room
-        from local.tui.identity_ui import RenameScreen
+        from local.rooms.ui import RoomRow
 
-        def done(title: str | None) -> None:
-            if not title:
-                return
-            try:
-                rename_room(room, title)
-            except RoomError as exc:
-                self.notify(str(exc))
-                return
-            self.rebuild_nav()
-            if self.current_room_id == room.id:
-                self.load_room(room)
-            self._save_rooms()
-
-        self.push_screen(RenameScreen(room.title, heading="重命名群"), done)
+        row = next((item for item in self.query(RoomRow) if item.room_id == room.id), None)
+        if row is None:
+            return
+        self._start_rename(row, "room", room.id, room.title)
 
     def _manage_room_members(self, room) -> None:
         from local.rooms.actions import RoomError, set_members
@@ -2119,11 +2489,19 @@ class LightAgentTUI(App):
             quota=runtime.quota,
         )
 
-    def open_session_menu(self, session: Session) -> None:
-        from local.tui.identity_ui import ConversationMenuScreen
-
+    def open_session_menu(self, session: Session, *, from_mouse: bool = False) -> None:
+        if self._rename_locked:
+            return
+        row = self._session_row(session)
+        if row is None:
+            return
         entries = menu_entries(meta_from_session(session))
-        self.push_screen(ConversationMenuScreen(session.title, entries), lambda action: self._on_menu(session, action))
+        self.open_row_menu(
+            row,
+            entries,
+            lambda action: self._on_menu(session, action),
+            from_mouse=from_mouse,
+        )
 
     def _on_menu(self, session: Session, action: str | None) -> None:
         if not action:
@@ -2148,6 +2526,7 @@ class LightAgentTUI(App):
             except Exception:
                 pass
             self.notify(f"对话 ID：{copied}")
+            self._focus_session_row(session)
             return
         result, _ws = self._mutate(session, action)
         if not result.ok:
@@ -2156,28 +2535,20 @@ class LightAgentTUI(App):
         self.rebuild_nav()
         if session.id == self.current.id:
             self.load_session(self.current)
+        self._focus_session_row(session)
 
     def _rename_session(self, session: Session) -> None:
-        from local.tui.identity_ui import RenameScreen
-
-        def done(title: str | None) -> None:
-            if not title:
-                return
-            previous = session.id
-            result, _ws = self._mutate(session, "rename", title=title)
-            if not result.ok:
-                self.notify(result.message)
-                return
-            if self.current.id != previous:
-                self.notify("重命名不应改变 id")
-            self.rebuild_nav()
-            self.load_session(self.current)
-
-        self.push_screen(RenameScreen(session.title), done)
+        row = self._session_row(session)
+        if row is None:
+            return
+        self._start_rename(row, "session", session.id, session.title)
 
     def _move_session(self, session: Session) -> None:
-        from local.tui.identity_ui import MoveGroupScreen, NewGroupScreen
+        from local.tui.identity_ui import NewGroupScreen
 
+        row = self._session_row(session)
+        if row is None:
+            return
         entries = move_targets(self.workspace_state(), meta_from_session(session))
 
         def done(choice: str | None) -> None:
@@ -2192,8 +2563,9 @@ class LightAgentTUI(App):
                 self._mutate(session, "move", project_id=choice.split(":", 1)[1])
             self.rebuild_nav()
             self.load_session(self.current)
+            self._focus_session_row(session)
 
-        self.push_screen(MoveGroupScreen(entries), done)
+        self.open_row_menu(row, entries, done)
 
     def _finish_new_group(self, session: Session, name: str | None) -> None:
         if not name:
@@ -2265,6 +2637,8 @@ class LightAgentTUI(App):
 
     async def action_new_session(self) -> None:
         # Ctrl+N / 顶栏 + ：未分组「会话」，不钻进项目。
+        if self._rename_locked:
+            return
         self.new_session_in_project(None)
 
 
@@ -2312,6 +2686,12 @@ class LightAgentTUI(App):
         self.query_one("#trace-search").focus()
 
     def action_clear_trace_filters(self) -> None:
+        if self._rename_locked:
+            self.cancel_title_edit()
+            return
+        if self._menu_is_open():
+            self.dismiss_row_menu()
+            return
         had_filter = bool(
             self._trace_filter.strip()
             or self._lane_filter

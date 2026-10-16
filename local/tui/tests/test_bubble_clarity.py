@@ -1,4 +1,4 @@
-"""图片样式气泡：soft_render PNG + TGP/Sixel。侧栏副标题是 avatar_id。"""
+"""图片样式气泡：soft_render PNG + TGP/Sixel。侧栏副标题是最新消息预览。"""
 
 from __future__ import annotations
 
@@ -175,8 +175,10 @@ async def _pilot(tmp_path):
         assert all(not row.nested for row in project_rows)
         assert "TUI 气泡样式" in {row.session.title for row in project_rows}
         assert "随便问问" not in {row.session.title for row in project_rows}
-        preview = project_rows[0].query_one(".s-preview")
-        assert project_rows[0].session.avatar in _plain(preview)
+        bubble_row = next(row for row in project_rows if row.session.title == "TUI 气泡样式")
+        preview_text = _plain(bubble_row.query_one(".s-preview"))
+        assert preview_text == "已改成圆角气泡"
+        assert bubble_row.session.avatar not in preview_text
         assert not list(app.query(".project-title"))
         assert "二开" not in _plain(app.query_one("#nav"))
 
@@ -202,7 +204,8 @@ async def _pilot(tmp_path):
         assert created.id in ungrouped_ids
         assert f"· 头像 {created.avatar}" in _plain(app.query_one("#h-title"))
         created_row = next(row for row in app.query(SessionRow) if row.session.id == created.id)
-        assert created.avatar in _plain(created_row.query_one(".s-preview"))
+        assert _plain(created_row.query_one(".s-preview")) == "新会话"
+        assert created.avatar not in _plain(created_row.query_one(".s-preview"))
 
         await pilot.click("#new-btn")
         await pilot.pause(0.05)

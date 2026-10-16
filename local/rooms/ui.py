@@ -11,6 +11,8 @@ from textual.widgets.option_list import Option
 
 from local.conversations.collaborate import resolve_bot
 from local.conversations.models import ConversationMeta
+from local.tui.preview_text import PREVIEW_GRAPHEMES, truncate_graphemes
+from local.tui.row_menu import is_right_button
 
 from .types import GroupRoom, RoomMessage
 
@@ -29,8 +31,8 @@ def member_labels(room: GroupRoom, roster: list[ConversationMeta]) -> list[str]:
 def room_preview(messages: list[RoomMessage]) -> str:
     for message in reversed(messages or []):
         if message.content and message.kind in ("chat", "host_summary", "system_notice"):
-            text = " ".join(message.content.split())[:36]
-            return f"{message.speaker_label}：{text}"
+            text = " ".join(message.content.split())
+            return truncate_graphemes(f"{message.speaker_label}：{text}", PREVIEW_GRAPHEMES)
     return "还没有人发言"
 
 
@@ -59,18 +61,41 @@ class RoomRow(Horizontal):
         if self.unread:
             self.add_class("unread")
 
-    def on_click(self) -> None:
-        opener = getattr(self.app, "open_room", None)
+    def on_click(self, event=None) -> None:
+        if event is not None and is_right_button(event):
+            event.stop()
+            return
+        app = self.app
+        if getattr(app, "_rename_locked", False) or getattr(self, "_renaming", False):
+            if event is not None:
+                event.stop()
+            return
+        opener = getattr(app, "open_room", None)
         if opener:
             opener(self.room_id)
 
     def on_key(self, event) -> None:
-        if event.key in ("colon", "m"):
-            menu = getattr(self.app, "open_room_menu", None)
+        app = self.app
+        if getattr(app, "_rename_locked", False) or getattr(self, "_renaming", False):
+            return
+        if event.key in ("colon", "m", ":"):
+            menu = getattr(app, "open_room_menu", None)
             if menu:
                 menu(self.room_id)
                 event.stop()
                 event.prevent_default()
+
+    def on_mouse_down(self, event) -> None:
+        if not is_right_button(event):
+            return
+        app = self.app
+        if getattr(app, "_rename_locked", False) or getattr(self, "_renaming", False):
+            event.stop()
+            return
+        menu = getattr(app, "open_room_menu", None)
+        if menu:
+            menu(self.room_id, from_mouse=True)
+            event.stop()
 
 
 class CreateRoomScreen(ModalScreen[dict | None]):

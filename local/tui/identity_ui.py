@@ -15,7 +15,7 @@ from local.conversations.templates import TEMPLATES, apply_template, commit_iden
 
 
 class ConversationMenuScreen(ModalScreen[str | None]):
-    """Same actions as the ``:`` / ``m`` menu. Dismisses with an action id."""
+    """Centered modal kept for callers that still push it. The sidebar opens a row overlay instead."""
 
     BINDINGS = [Binding("escape", "cancel", "关闭")]
 
@@ -60,6 +60,8 @@ class MoveGroupScreen(ModalScreen[str | None]):
 
 
 class RenameScreen(ModalScreen[str | None]):
+    """Centered rename dialog. Sidebar session and room rename is an inline input."""
+
     BINDINGS = [Binding("escape", "cancel", "关闭")]
 
     def __init__(self, current: str, *, heading: str = "重命名 Bot") -> None:
