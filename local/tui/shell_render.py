@@ -1,7 +1,8 @@
 """整窗预渲壳：侧栏 + 主区外框、大圆角、轻阴影。
 
 同一套超采样圆角也用来画搜索、侧栏按钮、输入条和选中行两端。
-洞口按单元格对齐，文字控件只占圆角内侧的格子，不和 TGP 占位符抢同一格。
+洞口按单元格对齐。圆角和阴影必须落在洞外：洞内会被不透明控件盖住，
+Textual 的 padding 又只会铺平涂底色，留在 padding 里的弧在真机上是直角。
 """
 from __future__ import annotations
 
@@ -64,34 +65,56 @@ class ShellMetrics:
 
 
 def compute_metrics(cols: int, rows: int, cw: int, ch: int, *, sidebar_cols: int = 32) -> ShellMetrics:
-    """大圆角必须落在内容区外侧。终端变矮时缩小半径，而不是盖住洞口。"""
+    """大圆角必须落在内容区外侧。终端变矮时缩小半径，而不是盖住洞口。
+
+    不能把 inset 裁到小于 page+radius。裁完之后洞口的直角会盖住弧，
+    源图仍是圆角，真机外轮廓却变成硬切。
+    """
     cols = max(1, cols)
     rows = max(1, rows)
     cw = max(1, cw)
     ch = max(1, ch)
     radius = 36
     page = 14
-    while radius > 16:
-        inset_x = max(2, math.ceil((page + radius) / cw))
-        inset_y = max(1, math.ceil((page + radius) / ch))
-        if inset_x * 2 <= cols - 40 and inset_y * 2 <= rows - 16:
-            break
+
+    def band_insets(page_px: int, radius_px: int) -> tuple[int, int]:
+        return (
+            max(1, math.ceil((page_px + radius_px) / cw)),
+            max(1, math.ceil((page_px + radius_px) / ch)),
+        )
+
+    inset_x, inset_y = band_insets(page, radius)
+    while radius > 12 and (
+        inset_x * 2 > max(8, cols - 36) or inset_y * 2 > max(6, rows - 14)
+    ):
         radius -= 2
         if page > 8 and radius < 28:
             page -= 1
-    else:
-        inset_x = max(1, min(4, cols // 8))
-        inset_y = max(1, min(2, rows // 10))
-        radius = max(8, min(radius, inset_y * ch - 4, inset_x * cw - 4))
-        page = max(4, min(page, inset_x * cw - radius))
-    inset_x = max(2, math.ceil((page + radius) / cw))
-    inset_y = max(1, math.ceil((page + radius) / ch))
-    inset_x = min(inset_x, max(1, cols // 5))
-    inset_y = min(inset_y, max(1, rows // 6))
+        inset_x, inset_y = band_insets(page, radius)
+
+    # 极窄终端：缩小圆角去适应格子，而不是把洞口拉进圆角带。
+    max_inset_x = max(1, (cols // 2) - 8) if cols > 24 else max(1, cols // 5)
+    max_inset_y = max(1, (rows // 2) - 5) if rows > 16 else max(1, rows // 6)
+    if inset_x > max_inset_x or inset_y > max_inset_y:
+        inset_x = min(inset_x, max_inset_x)
+        inset_y = min(inset_y, max_inset_y)
+        budget = min(inset_x * cw, inset_y * ch)
+        while page + radius > budget and radius > 4:
+            radius -= 1
+        while page + radius > budget and page > 2:
+            page -= 1
+        inset_x, inset_y = band_insets(page, radius)
+        inset_x = min(inset_x, max_inset_x)
+        inset_y = min(inset_y, max_inset_y)
+        while page + radius > min(inset_x * cw, inset_y * ch) and radius > 4:
+            radius -= 1
+        while page + radius > min(inset_x * cw, inset_y * ch) and page > 1:
+            page -= 1
+
     room = cols - inset_x * 2 - 28
-    sidebar_cols = max(20, min(sidebar_cols, max(20, room)))
+    sidebar_cols = max(16, min(sidebar_cols, max(16, room)))
     if inset_x + sidebar_cols >= cols - 8:
-        sidebar_cols = max(16, cols - inset_x - 12)
+        sidebar_cols = max(12, cols - inset_x - 10)
     return ShellMetrics(
         cols=cols,
         rows=rows,
@@ -155,6 +178,51 @@ def render_chrome(metrics: ShellMetrics) -> Image.Image:
     card.putalpha(mask)
     canvas.paste(card, (card_left, card_top), card)
     return canvas
+
+
+def cover_content_hole(image: Image.Image, metrics: ShellMetrics) -> Image.Image:
+    """洞口被不透明控件盖成直角底色之后，屏幕上还剩什么。
+
+    圆角和阴影若落在洞内，这里会把它们涂掉。真机验收看的就是这张，不是源图本身。
+    """
+    canvas = image.copy()
+    width, height = canvas.size
+    x0 = metrics.inset_x * metrics.cw
+    y0 = metrics.inset_y * metrics.ch
+    x1 = width - x0
+    y1 = height - y0
+    if x1 <= x0 or y1 <= y0:
+        return canvas
+    split = min(max(metrics.split_x, x0), x1)
+    pen = ImageDraw.Draw(canvas)
+    pen.rectangle((x0, y0, max(x0, split - 1), y1 - 1), fill=SIDEBAR_RGBA)
+    if split < x1:
+        pen.rectangle((split, y0, x1 - 1, y1 - 1), fill=MAIN_RGBA)
+    return canvas
+
+
+def card_silhouette(image: Image.Image, *, page: tuple[int, int, int] = PAGE_RGBA[:3]) -> list[int]:
+    """每一行上，第一个偏离页底色的 x。圆角卡片的取值会随行变化。"""
+    pixels = image.load()
+    width, height = image.size
+    steps: list[int] = []
+    for y in range(height):
+        first = width
+        for x in range(width):
+            px = pixels[x, y]
+            if px[3] < 16:
+                continue
+            if px[:3] != page:
+                first = x
+                break
+        steps.append(first)
+    return steps
+
+
+def diagonal_rgb(image: Image.Image, length: int) -> list[tuple[int, int, int]]:
+    pixels = image.load()
+    limit = min(length, image.width, image.height)
+    return [pixels[i, i][:3] for i in range(limit)]
 
 
 def render_pill(

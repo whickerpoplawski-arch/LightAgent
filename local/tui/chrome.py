@@ -1,7 +1,10 @@
 """整窗壳控件，以及同一套预渲胶囊。
 
-壳图是 ShellChrome 自己的底图。子控件缩在 padding 里，
-圆角和阴影留在外侧格子，不和文字抢 TGP 占位符。
+壳图是 ShellChrome 自己的 render()。圆角带必须落在子控件的 margin 外，
+不能落在本控件的 padding 上：Textual 画 padding 时只用背景色填一条空白，
+不会把 render() 里的 TGP 图画进去。洞口一旦盖住弧，源 PNG 仍是圆角，
+真机外轮廓却是直角硬切。
+
 搜索、侧栏动作、输入条是胶囊切片：上下沿和左右端盖是 PNG，
 中间那一格才是真正能打字、能点的控件。
 """
@@ -42,7 +45,7 @@ def _pixel() -> "object":
 
 
 class ShellChrome(Vertical):
-    """全屏预渲壳。子树放在 padding 洞里。resize 节流重画。"""
+    """全屏预渲壳。子树用 margin 让出圆角带。resize 节流重画。"""
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -73,20 +76,26 @@ class ShellChrome(Vertical):
                 cleanup()
         self._renderable = None
         self._key = key
-        # 洞口按格：padding 外侧才是圆角和阴影，里面交给可交互控件。
-        self.styles.padding = (metrics.inset_y, metrics.inset_x)
+        # padding 会被 Textual 画成平涂底色，圆角弧进不了那一圈。
+        # 洞口用子控件 margin 让出来，外侧格子才留得住整张壳图。
+        self.styles.padding = (0, 0)
         try:
-            self.app.query_one("#sidebar").styles.width = metrics.sidebar_cols
+            shell = self.query_one("#shell")
+            shell.styles.margin = (metrics.inset_y, metrics.inset_x)
+            self.query_one("#sidebar").styles.width = metrics.sidebar_cols
         except Exception:
             pass
         setattr(self.app, "_shell_metrics", metrics)
-        self.refresh()
+        self.refresh(layout=True)
 
     def render(self):
         if self._image is None:
             return ""
         if self._renderable is None:
-            self._renderable = graphics_widget_class()._Renderable(self._image)
+            # 按整窗格数铺，不让 Rich 把图缩进内容盒后再被子控件盖住。
+            cols = max(1, int(self.size.width))
+            rows = max(1, int(self.size.height))
+            self._renderable = graphics_widget_class()._Renderable(self._image, cols, rows)
         return self._renderable
 
 

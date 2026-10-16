@@ -9,7 +9,9 @@ Screen {
     height: 100%;
     background: #e8e8ed;
     border: none;
-    padding: 2 3;
+    /* padding 只会铺平涂底色，圆角必须留在 #shell 的 margin 外。 */
+    padding: 0;
+    overflow: hidden;
 }
 #shell {
     height: 100%;

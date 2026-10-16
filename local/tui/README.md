@@ -67,7 +67,7 @@ LIGHTAGENT_PROVIDER=openrouter OPENROUTER_API_KEY=... ./local/run_tui.sh
 
 - **设置 / 插件**：左下角 ⚙（或 Ctrl+,）打开设置层；左侧导航「插件」为首项；上方搜索/安装框支持本地路径、`owner/repo`、GitHub URL（git clone）；列表行标题 + 开关，写入 `local/plugins/enabled.json`，下次对话热加载工具（0 marketplace）
 - **侧栏**：「项目」是平铺的彩色 blob 行（标题 + `avatar_id`，没有「二开 ▼」文件夹头）、「群聊」（「创建群聊」在这一区）与「会话」（未分组）。Ctrl+P 新项目。Ctrl+N 和顶栏 + 只建未分组会话
-- **整窗壳**：侧栏+主区外框、大圆角和轻阴影是一张 PIL 预渲 PNG，铺在 `ShellChrome` 底上（kitty 用 TGP，否则 Sixel）。内容缩在按格对齐的洞里。搜索、`+ 新项目`、创建群聊、输入条、选中行两端用同一套预渲胶囊，不用 Textual `border: round` 细线框。
+- **整窗壳**：侧栏+主区外框、大圆角和轻阴影是一张 PIL 预渲 PNG，作为 `ShellChrome.render()` 铺满整窗（kitty 用 TGP，否则 Sixel）。交互内容用 margin 缩在洞里，圆角带留在洞外。不能改用 Textual padding 留这条边：padding 只铺平涂底色，真机外轮廓会变成直角。搜索、`+ 新项目`、创建群聊、输入条、选中行两端用同一套预渲胶囊，不用 `border: round` 细线框。
 - **对话页**：用户蓝气泡、助手灰气泡是 `soft_render` PNG。短句半径取半高，是肥胶囊。助手左侧和侧栏/顶栏是同一套 blob，像素同级。顶栏为 ``{标题} · 头像 {avatar_id}``。mock 后端不把 `mock-echo` 写进顶栏。输入框是「+ 给 LightAgent 发消息…」胶囊。
 - **kitty 截图**：`./local/run_tui.sh --shot`（不调 API）。产物示例见 `artifacts/tui-shell-kitty.png`。
 - **轨迹页**：

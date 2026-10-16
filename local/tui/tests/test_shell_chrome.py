@@ -11,7 +11,16 @@ pytest.importorskip("textual")
 from local.tui.app import LightAgentTUI, SessionRow, seed_demo_workspace
 from local.tui.backend import MockBackend
 from local.tui.graphics import HalfcellImage, UnicodeImage
-from local.tui.shell_render import PAGE_RGBA, SIDEBAR_RGBA, compute_metrics, render_chrome, render_pill
+from local.tui.shell_render import (
+    PAGE_RGBA,
+    SIDEBAR_RGBA,
+    card_silhouette,
+    compute_metrics,
+    cover_content_hole,
+    diagonal_rgb,
+    render_chrome,
+    render_pill,
+)
 from local.tui.soft_render import _bubble_radius, render_user_bubble
 
 
@@ -37,11 +46,27 @@ def _corner_has_antialiasing(image, radius: int) -> bool:
     return mixed >= 2
 
 
+def _soft_diagonal(image, metrics) -> bool:
+    """从页底走到侧栏色，中间要有多档过渡，不能一像素硬切。"""
+    colors = diagonal_rgb(image, metrics.page_px + metrics.radius_px + 6)
+    side = SIDEBAR_RGBA[:3]
+
+    def dist(a, b) -> int:
+        return abs(a[0] - b[0]) + abs(a[1] - b[1]) + abs(a[2] - b[2])
+
+    hit = next((i for i, color in enumerate(colors) if dist(color, side) <= 8), None)
+    if hit is None or hit < 4:
+        return False
+    window = colors[hit - 4 : hit + 1]
+    return len(set(window)) >= 3
+
+
 def test_chrome_is_a_rounded_card_not_a_square():
     metrics = compute_metrics(120, 46, 10, 20, sidebar_cols=32)
     assert metrics.radius_px >= 24
-    assert metrics.inset_x * 10 >= metrics.page_px + metrics.radius_px - 10
-    assert metrics.inset_y * 20 >= metrics.page_px + metrics.radius_px - 20
+    # 洞口必须盖住整条圆角带，子控件的直角底才不会切掉弧。
+    assert metrics.inset_x * metrics.cw >= metrics.page_px + metrics.radius_px
+    assert metrics.inset_y * metrics.ch >= metrics.page_px + metrics.radius_px
     image = render_chrome(metrics)
     assert image.size == (120 * 10, 46 * 20)
     assert image.getpixel((0, 0))[:3] == PAGE_RGBA[:3]
@@ -54,6 +79,11 @@ def test_chrome_is_a_rounded_card_not_a_square():
     assert _corner_has_antialiasing(image, metrics.radius_px)
     # 卡片角外侧仍是页底，不是直角白块
     assert image.getpixel((2, 2))[:3] == PAGE_RGBA[:3]
+    # 洞口涂成控件底色之后，外轮廓仍是圆角，对角线仍有多档过渡。
+    visible = cover_content_hole(image, metrics)
+    steps = card_silhouette(visible)
+    assert len(set(steps)) >= 8
+    assert _soft_diagonal(visible, metrics)
 
 
 def test_short_bubble_is_a_fat_capsule():
@@ -90,7 +120,17 @@ async def _controls(tmp_path):
         assert not list(app.query(UnicodeImage))
         metrics = app._shell_metrics
         assert metrics.radius_px >= 16
-        assert app.query_one("#shell-chrome").styles.padding.top == metrics.inset_y
+        chrome = app.query_one("#shell-chrome")
+        shell = app.query_one("#shell")
+        # padding 必须是 0。非 0 时外圈是平涂底色，TGP 圆角进不了画面。
+        assert chrome.styles.padding.top == 0
+        assert chrome.styles.padding.left == 0
+        assert shell.styles.margin.top == metrics.inset_y
+        assert shell.styles.margin.left == metrics.inset_x
+        assert shell.region.x >= chrome.region.x + metrics.inset_x
+        assert shell.region.y >= chrome.region.y + metrics.inset_y
+        assert chrome.region.right - shell.region.right >= metrics.inset_x
+        assert chrome.region.bottom - shell.region.bottom >= metrics.inset_y
         selected = [row for row in app.query(SessionRow) if "selected" in row.classes]
         assert selected
         left = selected[0].query_one(".row-cap-left")
