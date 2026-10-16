@@ -95,13 +95,13 @@ Screen { background: #f5f5f7; color: #1c1c1e; }
     border: round #f5f5f7;
 }
 .session-row.nested {
-    height: 3;
+    height: 5;
     margin-left: 1;
     padding: 0 0 0 1;
 }
-.session-row.nested .s-avatar { height: 4; margin-top: 0; width: 8; }
-.session-row.nested .s-meta { height: 3; padding: 0; }
-.session-row.nested .s-preview { display: none; }
+.session-row.nested .s-avatar { height: 3; margin-top: 0; width: 6; }
+.session-row.nested .s-meta { height: 5; padding: 0; }
+.session-row.nested .s-preview { display: block; height: 1; color: #8e8e93; }
 .session-row:hover { background: #efeff2; border: round #efeff2; }
 .session-row.selected {
     background: #e8e8ed;
@@ -257,11 +257,11 @@ UnderlineTabBar > .underline--bar {
     background: transparent;
 }
 
-/* 对话内 blob：半块真图，无方角色框 */
+/* 对话内 blob：小图 TermImage，不参与正文 */
 .msg-avatar {
-    width: 8;
-    height: 4;
-    min-width: 8;
+    width: 6;
+    height: 3;
+    min-width: 6;
     content-align: center middle;
     background: transparent;
     color: #ffffff;
@@ -269,24 +269,16 @@ UnderlineTabBar > .underline--bar {
     margin: 0 1 0 0;
 }
 
-/* User: 蓝底白字大圆角胶囊 */
-.user-row { align-horizontal: right; margin: 1 1 1 12; }
+/* User: 蓝底白字圆角胶囊（正文是 Textual 文本，不是气泡 PNG） */
+.user-row { align-horizontal: right; margin: 1 1 1 8; height: auto; }
 .user-bubble {
-    width: auto;
-    height: auto;
-    max-width: 58%;
-    background: transparent; /* soft PNG 主路径 */
-    color: #2f7cf6; /* unused when TermImage */
-    display: none;
-}
-.user-bubble-legacy {
     width: auto;
     height: auto;
     max-width: 58%;
     background: #2f7cf6;
     color: #ffffff;
     text-style: bold;
-    padding: 1 4;
+    padding: 0 2;
     border: round #2f7cf6;
 }
 
@@ -302,7 +294,7 @@ UnderlineTabBar > .underline--bar {
     max-width: 62%;
     background: #e9e9eb;
     color: #1c1c1e;
-    padding: 1 4;
+    padding: 0 2;
     margin: 0;
     border: round #e9e9eb;
 }
@@ -713,18 +705,7 @@ Select {
 Select:focus { border: round #3b82f6; }
 
 
-/* 真图气泡 / 头像（textual-image） */
-.soft-bubble {
-    height: auto;
-    width: auto;
-    max-width: 70%;
-    background: transparent;
-    border: none;
-    margin: 0;
-    padding: 0;
-}
-.user-soft { max-width: 60%; }
-.agent-soft { max-width: 72%; }
+/* 头像小图（textual-image）。正文气泡不走这里。 */
 .h-avatar {
     width: 5;
     height: 3;
@@ -738,4 +719,11 @@ Select:focus { border: round #3b82f6; }
     background: transparent !important;
     border: none !important;
 }
-.msg-avatar { display: none; }
+.msg-avatar {
+    width: 6;
+    height: 3;
+    min-width: 6;
+    background: transparent;
+    border: none;
+    margin: 0 1 0 0;
+}

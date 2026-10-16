@@ -31,7 +31,7 @@ from local.conversations.models import BotIdentity, ConversationMeta, ProjectGro
 from local.conversations.store import StoredWorkspace, Transcript, load_workspace, save_workspace
 from local.memory.host import MemoryHost, bind_host
 from local.memory.tui_panel import MemoryPanel
-from local.tui.projects import Project, fmt_ago, touch
+from local.tui.projects import Project, touch
 from local.tui.trace import (
     LANE_COLOR,
     LANE_LABEL,
@@ -47,11 +47,54 @@ DAILY_LIMIT = 45
 from local.tui.blobs import accent_for, assign_blob, paint_blob, pick_unused_blob
 from local.tui.blobs import BLOB_CATALOG as _BLOB_CATALOG
 AVATARS = [(b['id'], b['accent']) for b in _BLOB_CATALOG]
-from local.tui.soft_render import compose_agent_row, load_avatar, render_user_bubble
+from local.tui.soft_render import load_avatar
 from textual_image.widget import Image as TermImage
 
 # 兼容旧名
 assign_avatar = assign_blob
+
+# 气泡正文按终端单元格折行（中文占两格）。不要把正文再送进 TermImage。
+BUBBLE_WRAP_CELLS = 42
+
+
+def _rich_escape(text: str) -> str:
+    return str(text).replace("\\", "\\\\").replace("[", "\\[")
+
+
+def format_header(title: str, avatar_id: str, suffix: str = "") -> str:
+    """顶栏：``{title} · 头像 {avatar_id}``。"""
+    avatar = avatar_id or "blue_drop"
+    line = f"[b]{_rich_escape(title)}[/] · 头像 {avatar}"
+    extra = (suffix or "").strip()
+    if extra:
+        line += f"  [#3b82f6]{_rich_escape(extra)}[/]"
+    return line
+
+
+def wrap_terminal_text(text: str, width: int = BUBBLE_WRAP_CELLS) -> str:
+    """按显示宽度折行，避免气泡被拉成一整行。"""
+    from rich.cells import cell_len
+
+    width = max(4, width)
+    lines: list[str] = []
+    for raw in str(text).replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        if raw == "":
+            lines.append("")
+            continue
+        buf = ""
+        used = 0
+        for ch in raw:
+            cell = cell_len(ch) or 1
+            if buf and used + cell > width:
+                lines.append(buf)
+                buf = ch
+                used = cell
+            else:
+                buf += ch
+                used += cell
+        if buf:
+            lines.append(buf)
+    return "\n".join(lines)
 
 
 def style_blob(widget, accent: str = "", *, blob_id: str = "") -> None:
@@ -140,14 +183,15 @@ class SessionRow(Horizontal):
         prefix = (" ".join(bits) + " ") if bits else ""
         return f"{prefix}{self.session.title}"
 
+    def _subtitle(self) -> str:
+        """副标题用短 avatar_id，窄侧栏里也能读，不留空白。"""
+        return self.session.avatar or "blue_drop"
+
     def compose(self) -> ComposeResult:
         yield TermImage(load_avatar(self.session.avatar or "blue_drop", 48), classes="s-avatar")
         with Vertical(classes="s-meta"):
             yield Label(self._title(), classes="s-title")
-            yield Label(
-                f"{self.session.preview} · {fmt_ago(self.session.updated_at)}",
-                classes="s-preview",
-            )
+            yield Label(self._subtitle(), classes="s-preview")
 
     def on_mount(self) -> None:
         app = self.app
@@ -173,9 +217,7 @@ class SessionRow(Horizontal):
         except Exception:
             pass
         self.query_one(".s-title", Label).update(self._title())
-        self.query_one(".s-preview", Label).update(
-            f"{self.session.preview} · {fmt_ago(self.session.updated_at)}"
-        )
+        self.query_one(".s-preview", Label).update(self._subtitle())
         self._sync_flags()
 
     def on_click(self) -> None:
@@ -283,18 +325,29 @@ class ChatBubble(Horizontal):
                 classes += f" {self.speaker_class}"
             yield Static(self.speaker_label, classes=classes)
         if self.kind == "user":
-            # 抗锯齿圆角胶囊 PNG（调研：预渲图，避免 Textual 直角填充）
-            yield TermImage(render_user_bubble(self._text), classes="soft-bubble user-soft")
+            # 正文必须是终端字形。整段 PNG 再下采样会把中文打成马赛克。
+            yield Static(
+                wrap_terminal_text(self._text),
+                classes="user-bubble",
+                markup=False,
+                shrink=True,
+            )
         elif self.kind == "tool":
-            yield Static(f"⚙  工具调用 · {self._text}", classes="tool-line")
+            yield Static(f"⚙  工具调用 · {wrap_terminal_text(self._text)}", classes="tool-line", markup=False)
         elif self.kind == "error":
-            yield Static(f"✖  {self._text}", classes="error-line")
+            yield Static(f"✖  {wrap_terminal_text(self._text)}", classes="error-line", markup=False)
         elif self.kind == "notice":
-            yield Static(f"✳  {self._text}", classes="notice-line")
+            yield Static(f"✳  {wrap_terminal_text(self._text)}", classes="notice-line", markup=False)
         else:
-            # agent：真卡通 blob + 圆角气泡整行 PNG
+            # 左侧小图 blob；灰气泡正文是 Static，不再把整行渲成 PNG。
             bid = self.avatar or "blue_drop"
-            yield TermImage(compose_agent_row(bid, self._text), classes="soft-bubble agent-soft")
+            yield TermImage(load_avatar(bid, 48), classes="msg-avatar")
+            yield Static(
+                wrap_terminal_text(self._text),
+                classes="agent-bubble",
+                markup=False,
+                shrink=True,
+            )
 
     def on_mount(self) -> None:
         return
@@ -571,7 +624,7 @@ class LightAgentTUI(App):
     CSS_PATH = "app.tcss"
     TITLE = "LightAgent"
     BINDINGS = [
-        Binding("ctrl+n", "new_session", "新会话"),
+        Binding("ctrl+n", "new_session", "新会话", priority=True),
         Binding("ctrl+p", "new_project", "新项目", priority=True),
         Binding("ctrl+k", "focus_search", "搜索"),
         Binding("ctrl+l", "clear", "清空"),
@@ -654,10 +707,10 @@ class LightAgentTUI(App):
                     yield Vertical(id="pinned-list")
                     yield Label("项目", classes="nav-section")
                     yield Static("+ 新项目", id="new-project-btn", classes="nav-action")
-                    yield Static("创建群聊", id="group-chat-btn", classes="nav-action")
-                    yield Label("群聊", id="room-section", classes="nav-section")
-                    yield Vertical(id="room-list")
                     yield Vertical(id="project-list")
+                    yield Label("群聊", id="room-section", classes="nav-section")
+                    yield Static("创建群聊", id="group-chat-btn", classes="nav-action")
+                    yield Vertical(id="room-list")
                     yield Label("会话", classes="nav-section")
                     yield Vertical(id="ungrouped-list")
                     yield Static("显示已隐藏", id="show-hidden-btn", classes="nav-action")
@@ -840,7 +893,7 @@ class LightAgentTUI(App):
         project_box.remove_children()
         ungrouped_box.remove_children()
         room_box.remove_children()
-        self.query_one("#room-section", Label).display = bool(self.rooms)
+        self.query_one("#room-section", Label).display = True
         for room in self.rooms:
             if room.hidden and not self._show_hidden:
                 continue
@@ -922,7 +975,7 @@ class LightAgentTUI(App):
         return proj
 
     def new_session_in_project(self, project: Project | None = None) -> Session:
-        project = project or self.active_project
+        """新建会话。``project is None`` 进未分组「会话」，不回退到当前/演示项目。"""
         used = {x.avatar for x in self.sessions}
         blob_id, accent = pick_unused_blob(used, prefer_index=self._avatar_seq)
         self._avatar_seq += 1
@@ -1122,13 +1175,8 @@ class LightAgentTUI(App):
         for i, (kind, text) in enumerate(s.events):
             chat.mount(self.bubble(kind, text, i))
         chat.scroll_end(animate=False)
-        av = self.query_one("#h-avatar", TermImage)
-        av.image = load_avatar(s.avatar or "blue_drop", 40)
         role = (s.identity.role_title or "").strip()
-        title = f"[b]{s.title}[/]"
-        if role:
-            title += f"  [#3b82f6]{role}[/]"
-        self.query_one("#h-title", Label).update(title)
+        self.paint_header(s.title, s.avatar, role)
         self.query_one("#h-model", Label).update(f"模型 · {self.backend.name}")
         self.refresh_trace(s)
         self.update_stats()
@@ -1584,8 +1632,7 @@ class LightAgentTUI(App):
             return
         if s.title == "新会话" and not s.messages:
             s.title = text[:12]
-            self.query_one("#h-title", Label).update(f"[b]{s.title}[/]")
-            self.query_one("#h-avatar", TermImage).image = load_avatar(s.avatar or "blue_drop", 40)
+            self.paint_header(s.title, s.avatar, (s.identity.role_title or "").strip())
             for item in self.query(SessionRow):
                 if item.session is s:
                     item.refresh_text()
@@ -1696,7 +1743,7 @@ class LightAgentTUI(App):
     def on_click(self, event) -> None:
         wid = getattr(event.widget, "id", None)
         if wid == "new-btn":
-            self.new_session_in_project(self.active_project)
+            self.new_session_in_project(None)
         elif wid == "new-project-btn":
             self.create_project("新项目")
         elif wid == "settings-gear":
@@ -1800,8 +1847,7 @@ class LightAgentTUI(App):
         chat.scroll_end(animate=False)
         roster = [meta_from_session(session) for session in self.sessions]
         names = " · ".join(member_labels(room, roster))
-        self.query_one("#h-avatar", TermImage).image = load_avatar("blue_drop", 40)
-        self.query_one("#h-title", Label).update(f"[b]{room.title}[/]  [#3b82f6]{names}[/]")
+        self.paint_header(room.title, "blue_drop", names)
         self.query_one("#h-model", Label).update("群聊 · 规则主持")
         self.query_one("#thinking", Static).update("")
 
@@ -2136,9 +2182,14 @@ class LightAgentTUI(App):
     def action_edit_identity(self) -> None:
         self.open_identity_editor(self.current)
 
+    def paint_header(self, title: str, avatar_id: str, suffix: str = "") -> None:
+        avatar_id = avatar_id or "blue_drop"
+        self.query_one("#h-avatar", TermImage).image = load_avatar(avatar_id, 40)
+        self.query_one("#h-title", Label).update(format_header(title, avatar_id, suffix))
+
     async def action_new_session(self) -> None:
-        # 有激活项目则建在项目内，否则未分组
-        self.new_session_in_project(self.active_project)
+        # Ctrl+N / 顶栏 + ：未分组「会话」。进项目只走项目行上的 +。
+        self.new_session_in_project(None)
 
 
     def action_focus_search(self) -> None:

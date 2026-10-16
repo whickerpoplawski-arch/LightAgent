@@ -1,6 +1,8 @@
-"""真卡通头像 + 抗锯齿圆角气泡（调研：textual-image / endcord-image-pfp）。
+"""头像 PNG（TermImage 小图）以及可选的 HTML 预览。
 
-半块字符会马赛克；Textual 实心底+round 边仍直角。这里用 PIL 预渲 PNG。
+终端对话正文禁止走 ``render_user_bubble`` / ``compose_agent_row``。
+那些 PNG 进 TermImage 后会被下采样，中文糊成马赛克。
+TUI 气泡用 Textual Static + ``app.tcss`` 圆角蓝/灰底。
 """
 from __future__ import annotations
 
@@ -81,6 +83,7 @@ def _rounded_rect(size: tuple[int, int], radius: int, fill: tuple[int, int, int,
 
 
 def render_user_bubble(text: str) -> Image.Image:
+    """HTML 预览用。不要把返回值塞进 TUI 的 TermImage。"""
     font = _font(True, 18)
     inner_w = MAX_BUBBLE_W - 2 * PAD_X
     lines = _wrap(text, font, inner_w)
@@ -117,6 +120,7 @@ def render_agent_bubble(text: str) -> Image.Image:
 
 
 def compose_agent_row(blob_id: str, text: str, *, gap: int = 12) -> Image.Image:
+    """HTML 预览用整行图。TUI 的 agent 行要拆开头像小图和文本气泡。"""
     av = load_avatar(blob_id)
     bub = render_agent_bubble(text)
     h = max(av.height, bub.height)
