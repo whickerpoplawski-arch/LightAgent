@@ -1,40 +1,66 @@
-/* 图片样式壳：白卡片、浅灰侧栏、圆角胶囊。气泡正文是 PNG，不靠这里填色。 */
+/* 图片样式壳：外框是预渲 PNG。这里只铺洞内的平涂底色，不再用 border: round 撑圆。 */
 
-Screen { background: #e8e8ed; color: #1c1c1e; }
+Screen {
+    background: #e8e8ed;
+    color: #1c1c1e;
+}
+#shell-chrome {
+    width: 100%;
+    height: 100%;
+    background: #e8e8ed;
+    border: none;
+    padding: 2 3;
+}
 #shell {
     height: 100%;
-    background: #ffffff;
-    border: round #e5e5ea;
+    width: 100%;
+    margin: 0;
+    background: transparent;
+    border: none;
 }
 
 /* ---------- Sidebar ---------- */
 #sidebar {
-    width: 36;
+    width: 32;
     background: #f5f5f7;
     border-right: none;
-    padding: 1 1 0 1;
+    padding: 0 1 0 1;
 }
 #side-top { height: 3; padding: 0 1; }
 #brand { width: 1fr; height: 3; text-style: bold; content-align: left middle; color: #1c1c1e; }
 #new-btn {
-    width: 5; height: 3;
-    content-align: center middle;
-    background: #2f7cf6;
-    color: #ffffff;
-    border: round #2f7cf6;
-    text-style: bold;
-}
-#new-btn:hover { background: #2563eb; color: #ffffff; border: round #2563eb; }
-
-#search {
+    width: 5;
     height: 3;
-    margin: 0 0 1 0;
-    background: #eeeeef;
-    border: round #eeeeef;
+    background: transparent;
+    border: none;
+    padding: 0;
+    margin: 0;
+}
+.soft-button-img {
+    background: transparent;
+    border: none;
+    padding: 0;
+    margin: 0;
+}
+
+#search-wrap {
+    height: 3;
+    margin: 0 1 1 1;
+}
+#search, #prompt {
+    width: 1fr;
+    height: 1;
+    min-height: 1;
+    border: none;
     padding: 0 1;
+    margin: 0;
+    background: transparent;
     color: #3a3a3c;
 }
-#search:focus { border: round #2f7cf6; background: #ffffff; }
+#search:focus, #prompt:focus {
+    border: none;
+    background: transparent;
+}
 
 #pinned-list, #project-list, #room-list, #ungrouped-list {
     height: auto;
@@ -56,13 +82,11 @@ Screen { background: #e8e8ed; color: #1c1c1e; }
 .nav-action {
     height: 3;
     margin: 0 1 1 1;
-    padding: 0 1;
-    color: #3b82f6;
-    border: round #d4d4d8;
+    padding: 0;
+    color: #2f7cf6;
+    border: none;
     background: transparent;
-    content-align: left middle;
 }
-.nav-action:hover { border: round #a1a1aa; }
 .project-row {
     height: auto;
     margin: 0;
@@ -84,8 +108,14 @@ Screen { background: #e8e8ed; color: #1c1c1e; }
     min-height: 2;
 }
 .session-row.nested .s-preview { display: block; height: 1; color: #8e8e93; }
-.session-row:hover { background: #efeff2; }
-.session-row.selected { background: #e8e8ed; }
+.session-row:hover { background: #ececf0; }
+.session-row.selected { background: #e4e4e9; }
+.row-cap {
+    background: #f5f5f7;
+    border: none;
+    padding: 0;
+    margin: 0;
+}
 .session-row .s-avatar {
     content-align: center middle;
     background: transparent;
@@ -104,7 +134,7 @@ Screen { background: #e8e8ed; color: #1c1c1e; }
     margin: 0 1 1 1;
     padding: 0 1;
     color: #aeaeb2;
-    border: round #e5e5ea;
+    border: none;
     background: transparent;
     content-align: left middle;
 }
@@ -161,8 +191,9 @@ Screen { background: #e8e8ed; color: #1c1c1e; }
 #main { width: 1fr; background: #ffffff; }
 
 #header {
-    height: 3;
-    padding: 1 2 0 2;
+    height: auto;
+    min-height: 3;
+    padding: 0 2;
     align-vertical: middle;
     background: #ffffff;
     border-bottom: none;
@@ -173,8 +204,8 @@ Screen { background: #e8e8ed; color: #1c1c1e; }
     border: none;
     content-align: center middle;
 }
-#h-title { width: 1fr; color: #1c1c1e; }
-#h-model { width: auto; color: #aeaeb2; }
+#h-title { width: 1fr; height: 3; content-align: left middle; color: #1c1c1e; }
+#h-model { width: auto; height: 3; content-align: right middle; color: #aeaeb2; }
 
 /* ---------- Tabs ---------- */
 #tabs {
@@ -199,9 +230,13 @@ Tab.-active {
     text-style: bold;
     background: transparent;
 }
+Underline {
+    display: none;
+    height: 0;
+}
 UnderlineTabBar > .underline--bar {
-    color: #3b82f6;
-    background: #e5e5ea;
+    color: #2f7cf6;
+    background: #ffffff;
 }
 
 #chat {
@@ -223,7 +258,7 @@ UnderlineTabBar > .underline--bar {
     height: auto;
     width: 100%;
     background: transparent;
-    border: round #e5e5ea;
+    border: none;
     margin: 2 8;
     padding: 1 2;
 }
@@ -390,11 +425,11 @@ UnderlineTabBar > .underline--bar {
 #composer {
     height: 3;
     margin: 0 2 0 2;
-    padding: 0 1;
-    background: #ffffff;
-    border: round #e3e3e8;
+    padding: 0;
+    background: transparent;
+    border: none;
 }
-#composer:focus-within { border: round #2f7cf6; }
+#composer:focus-within { border: none; }
 #attach-hint { display: none; }
 #prompt { width: 1fr; height: 1; background: transparent; border: none; padding: 0 1; color: #1c1c1e; }
 #prompt:focus { border: none; background: transparent; }
@@ -451,18 +486,24 @@ UnderlineTabBar > .underline--bar {
     color: #8e8e93;
     content-align: left middle;
 }
-#ctx-pct {
-    width: auto;
+#pct-wrap {
+    width: 14;
     height: 3;
-    min-width: 8;
+    min-width: 12;
+    margin-left: 1;
+}
+#ctx-pct {
+    width: 1fr;
+    height: 1;
+    min-height: 1;
     padding: 0 1;
     color: #636366;
     text-style: bold;
-    background: #f2f2f4;
-    border: round #e5e5ea;
+    background: transparent;
+    border: none;
     content-align: center middle;
 }
-#ctx-pct:hover { border: round #d4d4d8; color: #3a3a3c; }
+#ctx-pct:hover { border: none; color: #3a3a3c; }
 
 #settings-gear {
     width: 3;
@@ -470,11 +511,11 @@ UnderlineTabBar > .underline--bar {
     content-align: center middle;
     color: #8e8e93;
     background: transparent;
-    border: round #f5f5f7;
+    border: none;
 }
 #settings-gear:hover {
     color: #3b82f6;
-    border: round #d4d4d8;
+    border: none;
 }
 
 SettingsScreen {
@@ -659,9 +700,40 @@ Select {
 Select:focus { border: round #3b82f6; }
 
 
-/* 头像 / 气泡 PNG：宽高由 graphics.fit_graphics_widget 按像素锁定。 */
-.h-avatar, .s-avatar, .msg-avatar, .soft-bubble {
+/* 头像 / 气泡 / 胶囊切片：宽高由 graphics.fit_graphics_widget 按像素锁定。 */
+.h-avatar, .s-avatar, .msg-avatar, .soft-bubble,
+.soft-top, .soft-bot, .soft-left, .soft-right, .soft-button-img {
     background: transparent;
     border: none;
     padding: 0;
+    margin: 0;
+}
+.soft-field {
+    height: 3;
+    width: 100%;
+    background: transparent;
+    border: none;
+    padding: 0;
+}
+.soft-top, .soft-bot, .soft-mid {
+    height: 1;
+    width: 1fr;
+    margin: 0;
+    padding: 0;
+    border: none;
+}
+.soft-mid {
+    height: 1;
+}
+.pill-label {
+    width: 1fr;
+    height: 1;
+    min-height: 1;
+    padding: 0 1;
+    margin: 0;
+    border: none;
+    content-align: left middle;
+    color: #2f7cf6;
+    text-style: bold;
+    background: transparent;
 }

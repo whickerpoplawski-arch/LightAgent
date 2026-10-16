@@ -29,7 +29,13 @@ if [[ ! -x "$PY" ]]; then
   PY="$(command -v python3)"
 fi
 
-if [[ -z "${LIGHTAGENT_API_KEY:-}${MX_API_KEY:-}${OPENAI_API_KEY:-}${OPENROUTER_API_KEY:-}" ]]; then
+shot_or_mock=0
+for arg in "$@"; do
+  if [[ "$arg" == "--mock" || "$arg" == "--shot" ]]; then
+    shot_or_mock=1
+  fi
+done
+if [[ "$shot_or_mock" -eq 0 && -z "${LIGHTAGENT_API_KEY:-}${MX_API_KEY:-}${OPENAI_API_KEY:-}${OPENROUTER_API_KEY:-}" ]]; then
   echo "缺少 API key：请提供 MX_API_KEY（或 LIGHTAGENT_API_KEY / OPENAI_API_KEY）" >&2
   exit 1
 fi

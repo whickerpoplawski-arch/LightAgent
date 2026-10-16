@@ -53,7 +53,9 @@ class RoomRow(Horizontal):
             yield Label(self.preview, classes="s-preview")
 
     def on_mount(self) -> None:
-        self.query_one(".s-avatar", Static).styles.border = ("round", "#34d399")
+        avatar = self.query_one(".s-avatar", Static)
+        avatar.styles.border = ("none", "transparent")
+        avatar.styles.background = "transparent"
         if self.unread:
             self.add_class("unread")
 
