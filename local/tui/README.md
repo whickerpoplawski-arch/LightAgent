@@ -25,7 +25,9 @@ local/tui/
 cd /workspace/LightAgent
 export MX_API_KEY=...   # 或 OPENAI_API_KEY
 
-# 推荐：一键脚本
+# 推荐：一键脚本。有 kitty 时用 kitty（TGP 真图气泡）。
+# 已经在 kitty 里会直接进入；没有 kitty 会打印警告，并以 Sixel 启动。
+# halfcell / unicode 马赛克不算图片样式验收通过。
 ./local/run_tui.sh
 
 # 等价：模块启动（未 --mock 时自动设 PROVIDER=mx / ALLOW / effort=low）
@@ -40,7 +42,7 @@ env -u NO_COLOR PYTHONPATH=. /workspace/la-venv/bin/python -m local.tui.app --mo
 LIGHTAGENT_PROVIDER=openrouter OPENROUTER_API_KEY=... ./local/run_tui.sh
 ```
 
-> 若终端是黑白的，检查是否设置了 `NO_COLOR`，用 `env -u NO_COLOR ...` 启动。
+> `NO_COLOR` 会让 Textual 把颜色涂成灰度。Kitty 用前景色认 TGP 图像 id，涂灰后圆角气泡是空白。`./local/run_tui.sh` 和 TUI 启动时都会清掉它。
 
 ## 快捷键
 
@@ -50,7 +52,7 @@ LIGHTAGENT_PROVIDER=openrouter OPENROUTER_API_KEY=... ./local/run_tui.sh
 | Ctrl+1 | 切到「对话」页 |
 | Ctrl+2 | 切到「轨迹」页 |
 | Ctrl+U | 打开/关闭上下文占用弹出层 |
-| Ctrl+N | 新会话（自动换下一个卡通头像） |
+| Ctrl+N | 新会话，进未分组「会话」（自动换下一个卡通头像） |
 | Ctrl+K | 搜索会话 |
 | Ctrl+L | 清空当前会话（含轨迹） |
 | Ctrl+, | 打开设置（插件） |
@@ -64,15 +66,15 @@ LIGHTAGENT_PROVIDER=openrouter OPENROUTER_API_KEY=... ./local/run_tui.sh
 ## UI 要点
 
 - **设置 / 插件**：左下角 ⚙（或 Ctrl+,）打开设置层；左侧导航「插件」为首项；上方搜索/安装框支持本地路径、`owner/repo`、GitHub URL（git clone）；列表行标题 + 开关，写入 `local/plugins/enabled.json`，下次对话热加载工具（0 marketplace）
-- **侧栏**：「项目」（可展开文件夹 +「+ 新项目」/ 行内 + 新建会话）与「会话」（未分组，按最后活动时间降序）；Ctrl+P 新项目，Ctrl+N 在当前项目或未分组新建会话
-- **对话页**：用户蓝圆角气泡右对齐；Agent 灰圆角气泡左对齐；工具调用灰色斜体小胶囊
+- **侧栏**：「项目」是平铺的彩色 blob 行（标题 + `avatar_id`，没有「二开 ▼」文件夹头）、「群聊」（「创建群聊」在这一区）与「会话」（未分组）。Ctrl+P 新项目。Ctrl+N 和顶栏 + 只建未分组会话
+- **对话页**：用户蓝气泡、助手灰气泡是 `soft_render` PNG，用 TGP（kitty）或 Sixel 显示，不用 Static，也不用 halfcell。助手左侧和侧栏/顶栏是 blob 小图。顶栏为 ``{标题} · 头像 {avatar_id}``。输入框是「+ 给 LightAgent 发消息…」胶囊
 - **轨迹页**：
   - 顶栏：时长 / 轮次 / 调用数 + 轨迹搜索
   - 多泳道时间线：输入（青）/ 模型（紫）/ 工具（橙）/ 其他（绿）
   - 彩色标签 feed：用户 / 助手 / 工具 / 上下文（工具失败显示红色 ✕）
   - **可交互**：点击时间线条块跳到该步骤；点泳道名筛泳道；点步骤高亮；点「调用」只看工具；搜索支持 `tool:`/`model:`/`user:`/`助手:` 前缀（默认不误伤 detail 里提到的工具名）；Enter 跳回对话并高亮对应气泡/工具芯片；Esc 清筛选
-- **底部统计条**（composer 下方）：`轮数 · 步数 · tok/s · 累计 tokens · 缓存命中% · 今日免费 x/45` + 可点的上下文 `%` 胶囊（Ctrl+U / 点击打开右侧紧凑「上下文已用」卡片：分段条 + 系统提示词/工具定义/对话消息）
-- 注意：Textual「有底色 + round 边框」四角会露方块，气泡/输入框用「透明底 + 圆角描边」
+- **底部统计条**（composer 下方）：`⚡ N轮 · N步 · 今日用量 x/45` + 可点的上下文 `%` 胶囊（Ctrl+U / 点击打开右侧紧凑「上下文已用」卡片）
+- 气泡圆角在 PNG 里超采样，不靠 Textual 的 round 边框画正文
 
 ## 统计字段：哪些是真的？
 

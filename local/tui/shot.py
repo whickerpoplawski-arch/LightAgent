@@ -66,11 +66,13 @@ async def main(
         app.query_one("#nav").scroll_home(animate=False)
         app.query_one("#chat").scroll_home(animate=False)
         await pilot.pause(0.3)
-        # 断言侧栏有项目标题控件
-        from local.tui.app import ProjectRow
-        assert list(app.query(ProjectRow))
-        titles = [str(pr.query_one(".project-title").render()) for pr in app.query(ProjectRow)]
-        assert any(("二开" in x) or ("Harness" in x) or ("评测" in x) for x in titles), titles
+        # 项目区是平铺会话行，不出现文件夹标题
+        from local.tui.app import SessionRow
+        rows = list(app.query_one("#project-list").query(SessionRow))
+        assert rows
+        titles = [row.session.title for row in rows]
+        assert any("气泡" in title or "轨迹" in title for title in titles), titles
+        assert not list(app.query(".project-title"))
         app.save_screenshot(out_chat)
         fix_svg_cjk(out_chat)
 

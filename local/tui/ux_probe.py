@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import asyncio
 
-from local.tui.app import AVATARS, LightAgentTUI, Session, TraceRow, TimelineLane, TimelineBlock, TimelineLaneLabel, ChatBubble, ProjectRow, SessionRow, seed_demo_workspace
+from local.tui.app import AVATARS, LightAgentTUI, Session, TraceRow, TimelineLane, TimelineBlock, TimelineLaneLabel, ChatBubble, SessionRow, seed_demo_workspace
 from local.tui.backend import MockBackend
 from local.tui.trace import TraceStep
 
@@ -298,11 +298,9 @@ async def probe_projects() -> list[str]:
         assert app.projects[0].name.startswith("新项目")
         notes.append(f"PASS 创建项目：{app.projects[0].name}")
 
-        # 项目内新会话（点 +）
-        row = next(r for r in app.query(ProjectRow) if r.project is app.projects[0])
-        add = row.query_one(".project-add")
+        # 项目内新会话（平铺列表没有文件夹 +，走 API）
         before = len(app.sessions_in_project(app.projects[0]))
-        await pilot.click(add)
+        app.new_session_in_project(app.projects[0])
         await pilot.pause(0.2)
         after = len(app.sessions_in_project(app.projects[0]))
         assert after == before + 1
@@ -310,10 +308,14 @@ async def probe_projects() -> list[str]:
         assert app.current.title == "新会话"
         notes.append(f"PASS 项目内新会话：project={app.projects[0].name} sessions={after}")
 
-        # 展开态：ProjectRow 下有 SessionRow.nested
-        nested = [r for r in app.query(SessionRow) if r.nested and r.session.project_id == app.projects[0].id]
-        assert nested, "展开项目应显示嵌套会话"
-        notes.append(f"PASS 项目展开嵌套行：{len(nested)}")
+        flat = [
+            r
+            for r in app.query_one("#project-list").query(SessionRow)
+            if r.session.project_id == app.projects[0].id and not r.nested
+        ]
+        assert flat, "项目区应平铺会话行"
+        assert not list(app.query(".project-title"))
+        notes.append(f"PASS 项目平铺行：{len(flat)}")
 
         # Ctrl+P 再新建
         before = len(app.projects)
