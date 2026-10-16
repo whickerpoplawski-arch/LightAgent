@@ -1,15 +1,17 @@
-/* Grok Bot–aligned UI — clean light gray, solid blue/gray bubbles, blob avatars.
-   Textual: solid fill + round same-color border keeps capsule look; slight square
-   corners at fill edge are acceptable if fill is clearly solid. */
+/* 图片样式壳：白卡片、浅灰侧栏、圆角胶囊。气泡正文是 PNG，不靠这里填色。 */
 
-Screen { background: #f5f5f7; color: #1c1c1e; }
-#shell { height: 100%; }
+Screen { background: #e8e8ed; color: #1c1c1e; }
+#shell {
+    height: 100%;
+    background: #ffffff;
+    border: round #e5e5ea;
+}
 
 /* ---------- Sidebar ---------- */
 #sidebar {
     width: 36;
     background: #f5f5f7;
-    border-right: solid #e5e5ea;
+    border-right: none;
     padding: 1 1 0 1;
 }
 #side-top { height: 3; padding: 0 1; }
@@ -17,22 +19,26 @@ Screen { background: #f5f5f7; color: #1c1c1e; }
 #new-btn {
     width: 5; height: 3;
     content-align: center middle;
-    background: transparent;
-    color: #3b82f6;
-    border: round #d4d4d8;
+    background: #2f7cf6;
+    color: #ffffff;
+    border: round #2f7cf6;
     text-style: bold;
 }
-#new-btn:hover { color: #2563eb; border: round #a1a1aa; }
+#new-btn:hover { background: #2563eb; color: #ffffff; border: round #2563eb; }
 
 #search {
+    height: 3;
     margin: 0 0 1 0;
-    background: transparent;
-    border: round #d4d4d8;
+    background: #eeeeef;
+    border: round #eeeeef;
     padding: 0 1;
     color: #3a3a3c;
 }
-#search:focus { border: round #3b82f6; background: transparent; }
+#search:focus { border: round #2f7cf6; background: #ffffff; }
 
+#pinned-list, #project-list, #room-list, #ungrouped-list {
+    height: auto;
+}
 #nav {
     background: transparent;
     height: 1fr;
@@ -59,64 +65,36 @@ Screen { background: #f5f5f7; color: #1c1c1e; }
 .nav-action:hover { border: round #a1a1aa; }
 .project-row {
     height: auto;
-    margin: 0 0 1 0;
+    margin: 0;
+    padding: 0;
     background: transparent;
 }
-.project-head {
-    height: 3;
-    min-height: 3;
-    padding: 0 1;
-    background: transparent;
-    border: round #e5e5ea;
-}
-.project-head:hover { border: round #d4d4d8; }
-.project-title {
-    width: 100%;
-    height: 1;
-    content-align: left middle;
-    text-style: bold;
-    color: #1c1c1e;
-    padding: 0 1;
-}
-.project-add {
-    width: 100%;
-    height: 1;
-    color: #3b82f6;
-    content-align: left middle;
-    padding: 0 2;
-    background: transparent;
-}
-.project-add:hover { text-style: bold; }
+.project-head, .project-title, .project-add { display: none; }
 .session-row {
-    height: 6;
+    height: auto;
+    min-height: 2;
     padding: 0 1;
-    margin: 0 0 0 0;
+    margin: 0;
     background: transparent;
-    border: round #f5f5f7;
+    border: none;
 }
 .session-row.nested {
-    height: 5;
-    margin-left: 1;
-    padding: 0 0 0 1;
+    margin-left: 0;
+    padding: 0 1;
+    min-height: 2;
 }
-.session-row.nested .s-avatar { height: 3; margin-top: 0; width: 6; }
-.session-row.nested .s-meta { height: 5; padding: 0; }
 .session-row.nested .s-preview { display: block; height: 1; color: #8e8e93; }
-.session-row:hover { background: #efeff2; border: round #efeff2; }
-.session-row.selected {
-    background: #e8e8ed;
-    border: round #e8e8ed;
-}
+.session-row:hover { background: #efeff2; }
+.session-row.selected { background: #e8e8ed; }
 .session-row .s-avatar {
-    width: 8; height: 4;
     content-align: center middle;
     background: transparent;
     color: #ffffff;
     border: none;
     margin-right: 1;
-    margin-top: 1;
+    margin-top: 0;
 }
-.session-row .s-meta { width: 1fr; height: 6; padding: 1 0 0 0; content-align: left middle; }
+.session-row .s-meta { width: 1fr; height: auto; padding: 0; content-align: left middle; }
 .session-row .s-title { text-style: bold; height: 1; color: #1c1c1e; }
 .session-row .s-preview { color: #8e8e93; height: 1; }
 .session-row.unread .s-title { text-style: bold; color: #3b82f6; }
@@ -169,7 +147,7 @@ Screen { background: #f5f5f7; color: #1c1c1e; }
 #side-foot {
     height: 3;
     padding: 0 1;
-    border-top: solid #e5e5ea;
+    border-top: solid #ececf0;
 }
 #profile-dot {
     width: 3; height: 1;
@@ -180,37 +158,36 @@ Screen { background: #f5f5f7; color: #1c1c1e; }
 #profile-label { width: 1fr; color: #8e8e93; height: 3; content-align: left middle; }
 
 /* ---------- Main ---------- */
-#main { width: 1fr; background: #f5f5f7; }
+#main { width: 1fr; background: #ffffff; }
 
 #header {
     height: 3;
     padding: 1 2 0 2;
     align-vertical: middle;
-    background: #fafafa;
-    border-bottom: solid #e5e5ea;
+    background: #ffffff;
+    border-bottom: none;
 }
 #h-avatar {
-    width: 8; height: 4;
     margin-right: 1;
     background: transparent;
     border: none;
     content-align: center middle;
 }
 #h-title { width: 1fr; color: #1c1c1e; }
-#h-model { width: auto; color: #8e8e93; }
+#h-model { width: auto; color: #aeaeb2; }
 
 /* ---------- Tabs ---------- */
 #tabs {
     height: 1fr;
-    background: #f5f5f7;
+    background: #ffffff;
 }
-#tabs > ContentSwitcher { height: 1fr; background: #f5f5f7; }
-TabPane { padding: 0; background: #f5f5f7; }
+#tabs > ContentSwitcher { height: 1fr; background: #ffffff; }
+TabPane { padding: 0; background: #ffffff; }
 UnderlineTabBar {
-    background: #fafafa;
+    background: #ffffff;
     padding: 0 2;
     height: 3;
-    border-bottom: solid #e5e5ea;
+    border-bottom: none;
 }
 Tab {
     color: #8e8e93;
@@ -230,14 +207,14 @@ UnderlineTabBar > .underline--bar {
 #chat {
     height: 1fr;
     padding: 1 3 0 3;
-    background: #f5f5f7;
+    background: #ffffff;
     scrollbar-size-vertical: 1;
     scrollbar-color: #d4d4d8;
     scrollbar-color-hover: #a1a1aa;
     scrollbar-color-active: #8e8e93;
-    scrollbar-background: #f5f5f7;
-    scrollbar-background-hover: #f5f5f7;
-    scrollbar-background-active: #f5f5f7;
+    scrollbar-background: #ffffff;
+    scrollbar-background-hover: #ffffff;
+    scrollbar-background-active: #ffffff;
 }
 
 .empty {
@@ -257,50 +234,28 @@ UnderlineTabBar > .underline--bar {
     background: transparent;
 }
 
-/* 对话内 blob：小图 TermImage，不参与正文 */
+/* 对话内 blob：真图，尺寸由像素对齐，不在这里拉宽 */
 .msg-avatar {
-    width: 6;
-    height: 3;
-    min-width: 6;
     content-align: center middle;
     background: transparent;
-    color: #ffffff;
     border: none;
     margin: 0 1 0 0;
+    padding: 0;
 }
 
-/* User: 蓝底白字圆角胶囊（正文是 Textual 文本，不是气泡 PNG） */
-.user-row { align-horizontal: right; margin: 1 1 1 8; height: auto; }
-.user-bubble {
-    width: auto;
-    height: auto;
-    max-width: 58%;
-    background: #2f7cf6;
-    color: #ffffff;
-    text-style: bold;
-    padding: 0 2;
-    border: round #2f7cf6;
-}
-
-/* Agent: 左侧 blob + 浅灰大圆角胶囊（对齐参考） */
+.user-row { align-horizontal: right; margin: 1 1 1 4; height: auto; }
 .agent-row {
     align-horizontal: left;
     align-vertical: top;
-    margin: 1 8 1 0;
-}
-.agent-bubble {
-    width: auto;
+    margin: 1 4 1 0;
     height: auto;
-    max-width: 62%;
-    background: #e9e9eb;
-    color: #1c1c1e;
-    padding: 0 2;
-    margin: 0;
-    border: round #e9e9eb;
 }
-.agent-bubble MarkdownParagraph { margin: 0; background: transparent; color: #1c1c1e; padding: 0 1; }
-.agent-bubble MarkdownBlock { background: transparent; color: #1c1c1e; }
-.agent-bubble MarkdownParagraph:last-child { margin: 0; }
+.soft-bubble {
+    background: transparent;
+    border: none;
+    padding: 0;
+    margin: 0;
+}
 
 .tool-row { align-horizontal: left; margin: 1 10 0 2; }
 .tool-line {
@@ -314,8 +269,7 @@ UnderlineTabBar > .underline--bar {
     margin: 0 0 0 0;
 }
 .error-row { align-horizontal: left; margin: 1 10 0 2; }
-.chat-bubble.chat-focused > .user-bubble { border: round #2563eb; text-style: bold; }
-.chat-bubble.chat-focused > .agent-bubble { border: round #d4d4d8; }
+/* 不要给 .soft-bubble 设 opacity。TGP 把图像 id 编进前景色，半透明会把它染灰。 */
 .chat-bubble.chat-focused > .tool-line { border: round #fb923c; text-style: bold; }
 .chat-bubble.chat-focused > .error-line { border: round #f87171; }
 
@@ -435,16 +389,16 @@ UnderlineTabBar > .underline--bar {
 
 #composer {
     height: 3;
-    margin: 0 2 1 2;
+    margin: 0 2 0 2;
     padding: 0 1;
     background: #ffffff;
-    border: round #d4d4d8;
+    border: round #e3e3e8;
 }
-#composer:focus-within { border: round #3b82f6; }
-#attach-hint { width: 3; height: 1; color: #8e8e93; text-style: bold; content-align: center middle; }
+#composer:focus-within { border: round #2f7cf6; }
+#attach-hint { display: none; }
 #prompt { width: 1fr; height: 1; background: transparent; border: none; padding: 0 1; color: #1c1c1e; }
 #prompt:focus { border: none; background: transparent; }
-#send-hint { width: 3; height: 1; color: #3b82f6; text-style: bold; content-align: center middle; }
+#send-hint { display: none; }
 
 #context-dock {
     display: none;
@@ -487,7 +441,7 @@ UnderlineTabBar > .underline--bar {
     height: 3;
     width: 100%;
     padding: 0 2;
-    background: #f5f5f7;
+    background: #ffffff;
     color: #8e8e93;
     align-vertical: middle;
 }
@@ -500,15 +454,15 @@ UnderlineTabBar > .underline--bar {
 #ctx-pct {
     width: auto;
     height: 3;
-    min-width: 9;
+    min-width: 8;
     padding: 0 1;
-    color: #3b82f6;
+    color: #636366;
     text-style: bold;
-    background: transparent;
-    border: round #d4d4d8;
+    background: #f2f2f4;
+    border: round #e5e5ea;
     content-align: center middle;
 }
-#ctx-pct:hover { border: round #3b82f6; color: #2563eb; }
+#ctx-pct:hover { border: round #d4d4d8; color: #3a3a3c; }
 
 #settings-gear {
     width: 3;
@@ -705,25 +659,9 @@ Select {
 Select:focus { border: round #3b82f6; }
 
 
-/* 头像小图（textual-image）。正文气泡不走这里。 */
-.h-avatar {
-    width: 5;
-    height: 3;
+/* 头像 / 气泡 PNG：宽高由 graphics.fit_graphics_widget 按像素锁定。 */
+.h-avatar, .s-avatar, .msg-avatar, .soft-bubble {
     background: transparent;
     border: none;
-    margin-right: 1;
-}
-.session-row .s-avatar {
-    width: 6;
-    height: 3;
-    background: transparent !important;
-    border: none !important;
-}
-.msg-avatar {
-    width: 6;
-    height: 3;
-    min-width: 6;
-    background: transparent;
-    border: none;
-    margin: 0 1 0 0;
+    padding: 0;
 }

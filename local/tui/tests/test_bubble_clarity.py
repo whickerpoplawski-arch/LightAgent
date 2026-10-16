@@ -1,19 +1,35 @@
-"""气泡正文必须是 Textual 文本；头像才用 TermImage。"""
+"""图片样式气泡：soft_render PNG + TGP/Sixel。侧栏副标题是 avatar_id。"""
 
 from __future__ import annotations
 
 import asyncio
 import inspect
+import os
 
 import pytest
 
 pytest.importorskip("textual")
 
-from textual.widgets import Static
-from textual_image.widget import Image as TermImage
-
 from local.tui.app import ChatBubble, LightAgentTUI, SessionRow, format_header, seed_demo_workspace
 from local.tui.backend import MockBackend
+from local.tui.blobs import BLOB_CATALOG
+from local.tui.graphics import (
+    HalfcellImage,
+    SixelImage,
+    TGPImage,
+    UnicodeImage,
+    graphics_widget_class,
+    preserve_image_colors,
+)
+from local.tui.soft_render import (
+    AGENT_RGBA,
+    BUBBLE_FONT_PX,
+    BUBBLE_RADIUS,
+    USER_RGBA,
+    _font,
+    render_agent_bubble,
+    render_user_bubble,
+)
 
 
 def _plain(widget) -> str:
@@ -24,21 +40,89 @@ def _plain(widget) -> str:
     return str(rendered)
 
 
-def test_compose_does_not_rasterize_bubble_text():
-    src = inspect.getsource(ChatBubble.compose)
-    assert "render_user_bubble" not in src
-    assert "compose_agent_row" not in src
-    assert "user-bubble" in src
-    assert "agent-bubble" in src
-    assert "load_avatar" in src
-
-
 def test_header_format_includes_avatar_id():
     assert format_header("新建试用", "indigo_hex") == "[b]新建试用[/] · 头像 indigo_hex"
     assert "· 头像 blue_drop" in format_header("健康日常", "", "习惯教练")
 
 
-def test_bubbles_are_text_and_new_session_stays_ungrouped(tmp_path):
+def test_avatar_pool_includes_reference_ids():
+    assert len(BLOB_CATALOG) >= 50
+    ids = {item["id"] for item in BLOB_CATALOG}
+    assert "indigo_hex" in ids
+    assert "blue_drop" in ids
+
+
+def test_soft_render_is_a_rounded_cjk_image():
+    assert BUBBLE_FONT_PX >= 18
+    assert BUBBLE_RADIUS >= 20
+    box = _font(False, BUBBLE_FONT_PX).getbbox("你")
+    assert box[2] - box[0] >= 16
+
+    user = render_user_bubble("你好，这是新对话")
+    agent = render_agent_bubble("你好！这是一条新会话，头像已与其它会话区分。")
+    assert user.getpixel((0, 0))[3] < 40
+    assert agent.getpixel((0, 0))[3] < 40
+    assert user.getpixel((12, user.height // 2))[:3] == USER_RGBA[:3]
+    assert agent.getpixel((12, agent.height // 2))[:3] == AGENT_RGBA[:3]
+    assert user.height >= BUBBLE_FONT_PX
+    assert agent.height >= BUBBLE_FONT_PX
+    def _count(image, pred) -> int:
+        pixels = image.load()
+        found = 0
+        for y in range(image.height):
+            for x in range(image.width):
+                if pred(pixels[x, y]):
+                    found += 1
+        return found
+
+    whites = _count(user, lambda px: px[0] > 240 and px[1] > 240 and px[2] > 240 and px[3] > 200)
+    darks = _count(agent, lambda px: px[0] < 50 and px[1] < 50 and px[2] < 50 and px[3] > 200)
+    assert whites > 40
+    assert darks > 40
+
+
+def test_bubble_widgets_are_tgp_or_sixel(monkeypatch):
+    monkeypatch.setenv("LIGHTAGENT_IMAGE_PROTOCOL", "tgp")
+    assert graphics_widget_class() is TGPImage
+    monkeypatch.setenv("LIGHTAGENT_IMAGE_PROTOCOL", "sixel")
+    assert graphics_widget_class() is SixelImage
+    monkeypatch.setenv("LIGHTAGENT_IMAGE_PROTOCOL", "halfcell")
+    monkeypatch.delenv("KITTY_WINDOW_ID", raising=False)
+    monkeypatch.delenv("KITTY_PID", raising=False)
+    monkeypatch.setenv("TERM", "xterm-256color")
+    chosen = graphics_widget_class()
+    assert chosen in (TGPImage, SixelImage)
+    assert chosen not in (HalfcellImage, UnicodeImage)
+
+    src = inspect.getsource(ChatBubble.compose)
+    assert "render_user_bubble" in src
+    assert "render_agent_bubble" in src
+    assert "GraphicsImage" in src
+    assert "HalfcellImage" not in src
+    assert "UnicodeImage" not in src
+    assert "user-bubble" not in src
+    assert "agent-bubble" not in src
+
+
+def test_launcher_prefers_kitty_and_does_not_pass_halfcell():
+    script = (os.path.dirname(__file__) + "/../../run_tui.sh")
+    text = open(os.path.normpath(script), encoding="utf-8").read()
+    assert "kitty" in text
+    assert "图片气泡需 TGP/Sixel 终端" in text
+    assert "halfcell/unicode 马赛克" in text
+    assert "LIGHTAGENT_IMAGE_PROTOCOL" in text
+    assert "unset NO_COLOR" in text
+
+
+def test_startup_clears_no_color_before_textual(monkeypatch):
+    monkeypatch.setenv("NO_COLOR", "1")
+    preserve_image_colors()
+    assert "NO_COLOR" not in os.environ
+    src = inspect.getsource(LightAgentTUI.__init__)
+    assert src.find("preserve_image_colors") < src.find("super().__init__")
+
+
+def test_flat_sidebar_and_image_bubbles(tmp_path):
     asyncio.run(_pilot(tmp_path))
 
 
@@ -67,26 +151,31 @@ async def _pilot(tmp_path):
 
         user = next(bubble for bubble in app.query(ChatBubble) if bubble.kind == "user")
         agent = next(bubble for bubble in app.query(ChatBubble) if bubble.kind == "agent")
-        assert list(user.query(TermImage)) == []
-        body = user.query_one(".user-bubble", Static)
-        assert user_text in _plain(body)
-        assert body.size.width > 4
-        assert body.styles.background.hex.lower() == "#2f7cf6"
+        user_images = list(user.query(TGPImage)) + list(user.query(SixelImage))
+        assert len(user_images) == 1
+        assert "soft-bubble" in user_images[0].classes
+        assert user_images[0].image.size[0] >= 40
+        assert not list(user.query(HalfcellImage))
+        assert not list(user.query(UnicodeImage))
+        assert user_images[0].size.width < 70
 
-        images = list(agent.query(TermImage))
-        assert len(images) == 1
-        assert "msg-avatar" in images[0].classes
-        assert images[0].image.size[0] <= 64
-        agent_body = agent.query_one(".agent-bubble", Static)
-        assert "新会话" in _plain(agent_body)
-        assert "soft-bubble" not in agent_body.classes
-        assert agent_body.styles.background.hex.lower() == "#e9e9eb"
-        assert agent_body.size.width > 4
+        agent_images = list(agent.query(TGPImage)) + list(agent.query(SixelImage))
+        assert len(agent_images) == 2
+        assert any("msg-avatar" in image.classes for image in agent_images)
+        assert any("soft-bubble" in image.classes for image in agent_images)
+        bubble = next(image for image in agent_images if "soft-bubble" in image.classes)
+        assert bubble.image.size[1] >= BUBBLE_FONT_PX
+        assert not list(agent.query(HalfcellImage))
 
-        nested = next(row for row in app.query(SessionRow) if row.nested)
-        preview = nested.query_one(".s-preview")
-        assert nested.session.avatar in _plain(preview)
-        assert preview.display
+        project_rows = list(app.query_one("#project-list").query(SessionRow))
+        assert project_rows
+        assert all(not row.nested for row in project_rows)
+        assert "TUI 气泡样式" in {row.session.title for row in project_rows}
+        assert "随便问问" not in {row.session.title for row in project_rows}
+        preview = project_rows[0].query_one(".s-preview")
+        assert project_rows[0].session.avatar in _plain(preview)
+        assert not list(app.query(".project-title"))
+        assert "二开" not in _plain(app.query_one("#nav"))
 
         nav_ids = [child.id for child in app.query_one("#nav").children]
         assert nav_ids.index("new-project-btn") < nav_ids.index("project-list")
@@ -95,6 +184,10 @@ async def _pilot(tmp_path):
         assert nav_ids.index("group-chat-btn") < nav_ids.index("ungrouped-list")
         assert app.query_one("#room-section").display
         assert "创建群聊" in _plain(app.query_one("#group-chat-btn"))
+        assert "+ 给 LightAgent 发消息" in app.query_one("#prompt").placeholder
+        stats = _plain(app.query_one("#stats"))
+        assert "⚡" in stats
+        assert "今日用量" in stats or "今日免费" in stats
 
         await pilot.press("ctrl+n")
         await pilot.pause(0.05)
@@ -105,14 +198,19 @@ async def _pilot(tmp_path):
         ungrouped_ids = {row.session.id for row in app.query_one("#ungrouped-list").query(SessionRow)}
         assert created.id in ungrouped_ids
         assert f"· 头像 {created.avatar}" in _plain(app.query_one("#h-title"))
+        created_row = next(row for row in app.query(SessionRow) if row.session.id == created.id)
+        assert created.avatar in _plain(created_row.query_one(".s-preview"))
 
         await pilot.click("#new-btn")
         await pilot.pause(0.05)
         assert app.current.project_id is None
         assert app.current.id not in demo.session_ids
 
-        project_row = next(row for row in app.query(".project-row") if row.project.name == "LightAgent 二开")
-        await pilot.click(project_row.query_one(".project-add"))
+        before = set(demo.session_ids)
+        placed = app.new_session_in_project(demo)
         await pilot.pause(0.05)
-        assert app.current.project_id == demo.id
-        assert app.current.id in demo.session_ids
+        assert placed.project_id == demo.id
+        assert placed.id in demo.session_ids
+        assert placed.id not in before
+        in_project = {row.session.id for row in app.query_one("#project-list").query(SessionRow)}
+        assert placed.id in in_project

@@ -1,8 +1,6 @@
-"""头像 PNG（TermImage 小图）以及可选的 HTML 预览。
+"""PIL 圆角气泡和头像。TUI 用 TGP/Sixel 挂这些 PNG，不用半块马赛克，也不用 Static 冒充。
 
-终端对话正文禁止走 ``render_user_bubble`` / ``compose_agent_row``。
-那些 PNG 进 TermImage 后会被下采样，中文糊成马赛克。
-TUI 气泡用 Textual Static + ``app.tcss`` 圆角蓝/灰底。
+HTML 预览只是附属，不能代替 kitty 里的真图验收。
 """
 from __future__ import annotations
 
@@ -14,24 +12,48 @@ from PIL import Image, ImageDraw, ImageFont
 
 from local.tui.blobs import BLOB_DIR, blob_path
 
-FONT_REG = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
-FONT_BOLD = "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"
+# 字号 ≥18、半径 ≥20。色值贴参考：用户蓝 #2f7cf6，助手灰 #e9e9eb。
+BUBBLE_FONT_PX = 20
+BUBBLE_RADIUS = 28
+AVATAR_PX = 64
+PAD_X, PAD_Y = 22, 16
+MAX_BUBBLE_W = 460
+LINE_H = 30
+USER_RGBA = (47, 124, 246, 255)  # #2f7cf6
+AGENT_RGBA = (233, 233, 235, 255)  # #e9e9eb
+USER_TEXT = (255, 255, 255, 255)
+AGENT_TEXT = (28, 28, 30, 255)
 
-# 像素尺寸（验收 HTML / 终端图共用）
-AVATAR_PX = 56
-BUBBLE_RADIUS = 22
-PAD_X, PAD_Y = 18, 14
-MAX_BUBBLE_W = 420
-LINE_H = 26
+_FONT_REGULAR = (
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+    "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+)
+_FONT_BOLD = (
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+    "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+)
+
+
+def _first_font(candidates: tuple[str, ...]) -> str | None:
+    for path in candidates:
+        if Path(path).is_file():
+            return path
+    return None
 
 
 @lru_cache(maxsize=8)
 def _font(bold: bool, size: int) -> ImageFont.FreeTypeFont:
-    path = FONT_BOLD if bold else FONT_REG
-    try:
-        return ImageFont.truetype(path, size=size, index=0)
-    except Exception:
-        return ImageFont.load_default()
+    path = _first_font(_FONT_BOLD if bold else _FONT_REGULAR)
+    if path:
+        try:
+            return ImageFont.truetype(path, size=size, index=0)
+        except Exception:
+            pass
+    return ImageFont.load_default()
 
 
 def load_avatar(blob_id: str, size: int = AVATAR_PX) -> Image.Image:
@@ -75,34 +97,40 @@ def _wrap(text: str, font: ImageFont.ImageFont, max_w: int) -> list[str]:
 
 
 def _rounded_rect(size: tuple[int, int], radius: int, fill: tuple[int, int, int, int]) -> Image.Image:
+    """超采样再缩小，圆角是光滑的，不是锯齿方块。"""
     w, h = size
-    im = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    d = ImageDraw.Draw(im)
-    d.rounded_rectangle((0, 0, w - 1, h - 1), radius=radius, fill=fill)
-    return im
+    scale = 4
+    big = Image.new("RGBA", (w * scale, h * scale), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(big)
+    draw.rounded_rectangle((0, 0, w * scale - 1, h * scale - 1), radius=radius * scale, fill=fill)
+    return big.resize((w, h), Image.Resampling.LANCZOS)
+
+
+def _paint_lines(image: Image.Image, lines: list[str], font: ImageFont.ImageFont, fill: tuple[int, int, int, int]) -> None:
+    draw = ImageDraw.Draw(image)
+    y = PAD_Y
+    for line in lines:
+        draw.text((PAD_X, y), line, font=font, fill=fill)
+        y += LINE_H
 
 
 def render_user_bubble(text: str) -> Image.Image:
-    """HTML 预览用。不要把返回值塞进 TUI 的 TermImage。"""
-    font = _font(True, 18)
+    """右对齐蓝胶囊。交给 TGPImage / SixelImage，不要交给 Halfcell。"""
+    font = _font(True, BUBBLE_FONT_PX)
     inner_w = MAX_BUBBLE_W - 2 * PAD_X
     lines = _wrap(text, font, inner_w)
     tw = int(max(font.getlength(ln) for ln in lines))
     th = LINE_H * len(lines)
-    w = min(MAX_BUBBLE_W, tw + 2 * PAD_X)
+    w = min(MAX_BUBBLE_W, max(tw + 2 * PAD_X, BUBBLE_RADIUS * 2))
     h = th + 2 * PAD_Y
-    bg = _rounded_rect((w, h), BUBBLE_RADIUS, (47, 124, 246, 255))
-    d = ImageDraw.Draw(bg)
-    y = PAD_Y
-    for ln in lines:
-        d.text((PAD_X, y), ln, font=font, fill=(255, 255, 255, 255))
-        y += LINE_H
+    bg = _rounded_rect((w, h), BUBBLE_RADIUS, USER_RGBA)
+    _paint_lines(bg, lines, font, USER_TEXT)
     return bg
 
 
 def render_agent_bubble(text: str) -> Image.Image:
-    font = _font(False, 18)
-    # 去掉简单 markdown
+    """左对齐浅灰胶囊。"""
+    font = _font(False, BUBBLE_FONT_PX)
     plain = re.sub(r"[*_`#>+]", "", text)
     inner_w = MAX_BUBBLE_W - 2 * PAD_X
     lines = _wrap(plain, font, inner_w)
@@ -110,17 +138,13 @@ def render_agent_bubble(text: str) -> Image.Image:
     th = LINE_H * len(lines)
     w = min(MAX_BUBBLE_W, max(tw + 2 * PAD_X, 80))
     h = th + 2 * PAD_Y
-    bg = _rounded_rect((w, h), BUBBLE_RADIUS, (233, 233, 235, 255))
-    d = ImageDraw.Draw(bg)
-    y = PAD_Y
-    for ln in lines:
-        d.text((PAD_X, y), ln, font=font, fill=(28, 28, 30, 255))
-        y += LINE_H
+    bg = _rounded_rect((w, h), BUBBLE_RADIUS, AGENT_RGBA)
+    _paint_lines(bg, lines, font, AGENT_TEXT)
     return bg
 
 
 def compose_agent_row(blob_id: str, text: str, *, gap: int = 12) -> Image.Image:
-    """HTML 预览用整行图。TUI 的 agent 行要拆开头像小图和文本气泡。"""
+    """头像 + 灰气泡整行。TUI 也可以拆成 blob 小图和气泡 PNG 两张。"""
     av = load_avatar(blob_id)
     bub = render_agent_bubble(text)
     h = max(av.height, bub.height)

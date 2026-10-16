@@ -47,13 +47,13 @@ DAILY_LIMIT = 45
 from local.tui.blobs import accent_for, assign_blob, paint_blob, pick_unused_blob
 from local.tui.blobs import BLOB_CATALOG as _BLOB_CATALOG
 AVATARS = [(b['id'], b['accent']) for b in _BLOB_CATALOG]
-from local.tui.soft_render import load_avatar
-from textual_image.widget import Image as TermImage
+from local.tui.graphics import GraphicsImage, fit_graphics_widget, preserve_image_colors
+from local.tui.soft_render import load_avatar, render_agent_bubble, render_user_bubble
 
 # 兼容旧名
 assign_avatar = assign_blob
 
-# 气泡正文按终端单元格折行（中文占两格）。不要把正文再送进 TermImage。
+# 工具/错误行仍按单元格折行。用户/助手正文是 soft_render PNG，不走这条。
 BUBBLE_WRAP_CELLS = 42
 
 
@@ -188,12 +188,13 @@ class SessionRow(Horizontal):
         return self.session.avatar or "blue_drop"
 
     def compose(self) -> ComposeResult:
-        yield TermImage(load_avatar(self.session.avatar or "blue_drop", 48), classes="s-avatar")
+        yield GraphicsImage(load_avatar(self.session.avatar or "blue_drop", 48), classes="s-avatar")
         with Vertical(classes="s-meta"):
             yield Label(self._title(), classes="s-title")
             yield Label(self._subtitle(), classes="s-preview")
 
     def on_mount(self) -> None:
+        fit_graphics_widget(self.query_one(".s-avatar"))
         app = self.app
         if isinstance(app, LightAgentTUI) and app.current is self.session:
             self.add_class("selected")
@@ -211,9 +212,9 @@ class SessionRow(Horizontal):
 
     def refresh_text(self) -> None:
         try:
-            self.query_one(".s-avatar", TermImage).image = load_avatar(
-                self.session.avatar or "blue_drop", 48
-            )
+            avatar = self.query_one(".s-avatar")
+            avatar.image = load_avatar(self.session.avatar or "blue_drop", 48)
+            fit_graphics_widget(avatar)
         except Exception:
             pass
         self.query_one(".s-title", Label).update(self._title())
@@ -249,7 +250,7 @@ class SessionRow(Horizontal):
 
 
 class ProjectRow(Vertical):
-    """可展开项目：标题行 + 下属会话。"""
+    """项目里的会话平铺成 blob 行，不画「名称 ▼」文件夹头。"""
 
     def __init__(self, project: Project, sessions: list[Session]) -> None:
         super().__init__(classes="project-row")
@@ -257,31 +258,8 @@ class ProjectRow(Vertical):
         self._sessions = list(sessions)
 
     def compose(self) -> ComposeResult:
-        chev = "▼" if self.project.expanded else "▶"
-        with Horizontal(classes="project-head"):
-            yield Static(f"{chev} {self.project.name}", classes="project-title")
-            yield Static("+", classes="project-add")
-        if self.project.expanded:
-            for s in sorted(self._sessions, key=lambda x: x.updated_at, reverse=True):
-                yield SessionRow(s, nested=True)
-
-    def on_click(self, event) -> None:
-        app = self.app
-        if not isinstance(app, LightAgentTUI):
-            return
-        w = event.widget
-        cur = w
-        while cur is not None and cur is not self:
-            if isinstance(cur, SessionRow):
-                return
-            cur = cur.parent
-        classes = set(getattr(w, "classes", []) or [])
-        if "project-add" in classes or w is self.query_one(".project-add"):
-            app.new_session_in_project(self.project)
-            event.stop()
-            return
-        app.toggle_project(self.project)
-        event.stop()
+        for s in sorted(self._sessions, key=lambda x: x.updated_at, reverse=True):
+            yield SessionRow(s, nested=False)
 
 
 SessionItem = SessionRow  # 旧测试兼容
@@ -325,13 +303,7 @@ class ChatBubble(Horizontal):
                 classes += f" {self.speaker_class}"
             yield Static(self.speaker_label, classes=classes)
         if self.kind == "user":
-            # 正文必须是终端字形。整段 PNG 再下采样会把中文打成马赛克。
-            yield Static(
-                wrap_terminal_text(self._text),
-                classes="user-bubble",
-                markup=False,
-                shrink=True,
-            )
+            yield GraphicsImage(render_user_bubble(self._text), classes="soft-bubble user-soft")
         elif self.kind == "tool":
             yield Static(f"⚙  工具调用 · {wrap_terminal_text(self._text)}", classes="tool-line", markup=False)
         elif self.kind == "error":
@@ -339,18 +311,13 @@ class ChatBubble(Horizontal):
         elif self.kind == "notice":
             yield Static(f"✳  {wrap_terminal_text(self._text)}", classes="notice-line", markup=False)
         else:
-            # 左侧小图 blob；灰气泡正文是 Static，不再把整行渲成 PNG。
             bid = self.avatar or "blue_drop"
-            yield TermImage(load_avatar(bid, 48), classes="msg-avatar")
-            yield Static(
-                wrap_terminal_text(self._text),
-                classes="agent-bubble",
-                markup=False,
-                shrink=True,
-            )
+            yield GraphicsImage(load_avatar(bid, 64), classes="msg-avatar")
+            yield GraphicsImage(render_agent_bubble(self._text), classes="soft-bubble agent-soft")
 
     def on_mount(self) -> None:
-        return
+        for widget in self.query(".soft-bubble, .msg-avatar"):
+            fit_graphics_widget(widget)
 
 
 class TraceRow(Static):
@@ -474,25 +441,28 @@ def seed_demo_workspace() -> tuple[list[Session], list[Project]]:
     now = time.time()
     a = assign_avatar
 
-    def S(title, events, avatar_i, ago_s, project_id=None):
-        em, ac = a(avatar_i)
+    def S(title, events, avatar, ago_s, project_id=None):
+        if isinstance(avatar, int):
+            em, ac = a(avatar)
+        else:
+            em, ac = str(avatar), accent_for(str(avatar))
         s = Session(title, events=list(events), avatar=em, accent=ac, project_id=project_id)
         s.updated_at = now - ago_s
         return s
 
     p1 = Project("LightAgent 二开", expanded=True)
     p2 = Project("评测 Harness", expanded=True)
-    s1 = S("TUI 气泡样式", [("user", "对话框软化"), ("agent", "已改成圆角气泡")], 0, 600, p1.id)
-    s2 = S("轨迹可视化", [("user", "加轨迹页"), ("agent", "泳道+feed 好了")], 1, 3600, p1.id)
-    s3 = S("免费额度护栏", [("user", "别超额度"), ("agent", "本地 45 次上限")], 2, 7200, p1.id)
-    s4 = S("任务集设计", [("user", "怎么做评测？"), ("agent", "mock 工具+轨迹断言")], 3, 86400, p2.id)
-    s5 = S("抽检脚本", [("user", "写个 runner"), ("agent", "pytest + fixtures")], 4, 90000, p2.id)
+    s1 = S("TUI 气泡样式", [("user", "对话框软化"), ("agent", "已改成圆角气泡")], "blue_drop", 600, p1.id)
+    s2 = S("轨迹可视化", [("user", "加轨迹页"), ("agent", "泳道+feed 好了")], "pink_cloud", 3600, p1.id)
+    s3 = S("免费额度护栏", [("user", "别超额度"), ("agent", "本地 45 次上限")], "orange_cloud", 7200, p1.id)
+    s4 = S("任务集设计", [("user", "怎么做评测？"), ("agent", "mock 工具+轨迹断言")], "black_star", 86400, p2.id)
+    s5 = S("抽检脚本", [("user", "写个 runner"), ("agent", "pytest + fixtures")], "brown_hex", 90000, p2.id)
     p1.session_ids = [s1.id, s2.id, s3.id]
     p2.session_ids = [s4.id, s5.id]
 
-    u1 = S("随便问问", [("user", "今天天气？"), ("agent", "（未分组）晴")], 5, 300)
-    u2 = S("灵感备忘", [("user", "记一下想法"), ("agent", "已记下")], 6, 1800)
-    u3 = S("临时代码", [("user", "一段 scrap"), ("agent", "ok")], 7, 100000)
+    u1 = S("随便问问", [("user", "今天天气？"), ("agent", "（未分组）晴")], "blue_tri", 300)
+    u2 = S("灵感备忘", [("user", "记一下想法"), ("agent", "已记下")], "lime_squircle", 1800)
+    u3 = S("临时代码", [("user", "一段 scrap"), ("agent", "ok")], "purple_blob", 100000)
 
     sessions = [s1, s2, s3, s4, s5, u1, u2, u3]
     return sessions, [p1, p2]
@@ -650,6 +620,7 @@ class LightAgentTUI(App):
         workspace_dir: str | Path | None = None,
         persist: bool | None = None,
     ) -> None:
+        preserve_image_colors()
         super().__init__()
         self.backend = backend
         self._workspace_dir = Path(workspace_dir) if workspace_dir else (
@@ -720,7 +691,7 @@ class LightAgentTUI(App):
                     yield Static("⚙", id="settings-gear")
             with Vertical(id="main"):
                 with Horizontal(id="header"):
-                    yield TermImage(load_avatar("blue_drop", 40), id="h-avatar", classes="h-avatar")
+                    yield GraphicsImage(load_avatar("blue_drop", 48), id="h-avatar", classes="h-avatar")
                     yield Label("", id="h-title")
                     yield Label("", id="h-model")
                 with TabbedContent(id="tabs"):
@@ -741,7 +712,7 @@ class LightAgentTUI(App):
                 yield Static("", id="thinking")
                 with Horizontal(id="composer"):
                     yield Static("+", id="attach-hint")
-                    yield Input(placeholder="给 LightAgent 发消息…", id="prompt")
+                    yield Input(placeholder="+ 给 LightAgent 发消息…", id="prompt")
                     yield Static(">", id="send-hint")
                 with Horizontal(id="context-dock"):
                     yield Static("", id="ctx-spacer")
@@ -905,10 +876,12 @@ class LightAgentTUI(App):
         def matches(session: Session) -> bool:
             if not query:
                 return True
-            return query in session.title.lower() or query in session.preview.lower()
+            blob = (session.avatar or "").lower()
+            return query in session.title.lower() or query in session.preview.lower() or query in blob
 
         pinned = [by_id[meta.id] for meta in sections["pinned"] if meta.id in by_id and matches(by_id[meta.id])]
         self.query_one("#pinned-section", Label).display = bool(pinned)
+        self.query_one("#pinned-list", Vertical).display = bool(pinned)
         for session in pinned:
             pinned_box.mount(SessionRow(session, nested=False))
         for group in sections["projects"]:
@@ -1278,13 +1251,12 @@ class LightAgentTUI(App):
         used = self.backend.usage()
         tok_s = live_tok_s if live_tok_s is not None else st.tok_per_s
         self._live_tok_s = tok_s
-        line = (
-            f"⚡  {st.rounds} 轮  {st.steps} 步"
-            f"   ·   {tok_s:.0f} tok/s"
-            f"   ·   {self._fmt_tokens(st.tokens)} tok"
-            f"   ·   缓存命中 {st.cache_hit_pct:.0f}%"
-            f"   ·   今日用量 {used}/{DAILY_LIMIT}" if getattr(__import__("local.openrouter_config", fromlist=["PROVIDER"]), "PROVIDER", "") == "mx" else f"   ·   今日免费 {used}/{DAILY_LIMIT}"
-        )
+        from local import openrouter_config as orc
+
+        quota = "今日用量" if orc.PROVIDER == "mx" else "今日免费"
+        line = f"⚡  {st.rounds}轮 · {st.steps}步 · {quota} {used}/{DAILY_LIMIT}"
+        if tok_s:
+            line += f"  ·  {tok_s:.0f} tok/s"
         if s.compact_banner:
             line += f"   ·   {s.compact_banner}"
         self.query_one("#stats", Static).update(line)
@@ -2184,11 +2156,13 @@ class LightAgentTUI(App):
 
     def paint_header(self, title: str, avatar_id: str, suffix: str = "") -> None:
         avatar_id = avatar_id or "blue_drop"
-        self.query_one("#h-avatar", TermImage).image = load_avatar(avatar_id, 40)
+        avatar = self.query_one("#h-avatar")
+        avatar.image = load_avatar(avatar_id, 48)
+        fit_graphics_widget(avatar)
         self.query_one("#h-title", Label).update(format_header(title, avatar_id, suffix))
 
     async def action_new_session(self) -> None:
-        # Ctrl+N / 顶栏 + ：未分组「会话」。进项目只走项目行上的 +。
+        # Ctrl+N / 顶栏 + ：未分组「会话」，不钻进项目。
         self.new_session_in_project(None)
 
 
