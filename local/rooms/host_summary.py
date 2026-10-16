@@ -10,17 +10,12 @@ from .types import RoomMessage
 
 _FALLBACK = "可以说「今日健身和饮食」，或 @某位成员。"
 _MENTION_MISS = "没有在本群成员里找到这个 @。可以说「今日健身和饮食」，或 @一位成员。"
-_ACTION_LIMIT = 40
 
 
 def _one_action(label: str, content: str) -> str:
-    """A short action. Long bubbles are not pasted back."""
-    text = " ".join((content or "").split())
+    """Name who spoke. Their sentence stays in their own bubble."""
+    del content
     name = (label or "成员").strip() or "成员"
-    if text and len(text) <= _ACTION_LIMIT:
-        line = f"{name}：{text}"
-        if len(line) <= _ACTION_LIMIT:
-            return line
     return f"{name}已给出建议"
 
 
@@ -40,12 +35,25 @@ def render_host_summary(
         if "@" in (user_text or ""):
             return _MENTION_MISS
         return _FALLBACK
-    actions = [_one_action(item.speaker_label, item.content) for item in named[:6]]
+    actions: list[str] = []
+    seen: set[str] = set()
+    for item in named[:6]:
+        clause = _one_action(item.speaker_label, item.content)
+        if clause in seen:
+            continue
+        seen.add(clause)
+        actions.append(clause)
     diet_items = [str(text).strip() for text in (constraints or []) if str(text).strip()]
     diet = "、".join(diet_items) if diet_items else "（无）"
     step = " ".join((next_step or "").split()) or _FALLBACK
-    return "\n".join([
+    user_norm = " ".join((user_text or "").split())
+    if len(user_norm) >= 8 and user_norm in step:
+        step = _FALLBACK
+    summary = "\n".join([
         "动作：" + "；".join(actions),
         "忌口：" + diet,
         "下一步：" + step,
     ])
+    if len(user_norm) >= 8 and summary.count(user_norm) > 1:
+        summary = summary.replace(user_norm, "", 1)
+    return summary

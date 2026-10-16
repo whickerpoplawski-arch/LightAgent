@@ -165,7 +165,7 @@ cases:
     bar: B
     dim: context
     tier: jd
-    title: B consolidate job 仅入队（stub 不进化）— 架构探针
+    title: B consolidate 入队后可观测（空批写明跳过）
     mode: store
     store_action: enqueue_consolidate
     turns:
@@ -173,7 +173,7 @@ cases:
         text: (enqueue consolidate)
     expect:
       stores:
-        - check: consolidate_job_queued_not_run
+        - check: consolidate_observable
 
   - id: JD-B04
     bar: B
@@ -644,7 +644,7 @@ cases:
     bar: B
     dim: context
     tier: jd
-    title: B 有 pin 写入后 enqueue 仍 stub（应巩固而未巩固）
+    title: B pin 与忌口在巩固后仍在，且作业可观测
     mode: store
     store_action: enqueue_consolidate
     setup:
@@ -655,17 +655,17 @@ cases:
         text: (enqueue after writes)
     expect:
       stores:
+        - check: consolidate_observable
         - check: memory_pinned_contains
           args: {needle: 小Q}
         - check: constraint_contains
           args: {needle: 海鲜}
-        - check: consolidate_job_queued_not_run
 
   - id: JD-B08
     bar: B
     dim: context
     tier: jd
-    title: B supersede+enqueue 仍无 consolidate 执行（非自进化）
+    title: B 单条忌口巩固后仍在，作业可观测
     mode: store
     store_action: enqueue_consolidate
     setup:
@@ -675,7 +675,9 @@ cases:
         text: (enqueue after supersede path primed)
     expect:
       stores:
-        - check: consolidate_job_queued_not_run
+        - check: consolidate_observable
+        - check: constraint_contains
+          args: {needle: 海鲜}
 
   # ---- C v2 规划拒滥拆 / 多工具 ----
   - id: JD-C09

@@ -24,7 +24,7 @@ class MemoryEditor:
             lane=lane or None,
             include_candidates=True,
         )
-        return [self._row(item) for item in rows]
+        return [self._row(item) for item in rows if item.status != "superseded"]
 
     def learn(
         self,
