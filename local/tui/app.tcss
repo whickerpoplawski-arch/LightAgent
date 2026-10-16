@@ -127,8 +127,8 @@ Screen {
     margin-top: 0;
 }
 .session-row .s-meta { width: 1fr; height: auto; padding: 0; content-align: left middle; }
-.session-row .s-title { text-style: bold; height: 1; color: #1c1c1e; }
-.session-row .s-preview { color: #8e8e93; height: 1; }
+.session-row .s-title { text-style: bold; height: 1; width: 1fr; color: #1c1c1e; }
+.session-row .s-preview { color: #8e8e93; height: 1; width: 1fr; overflow: hidden; }
 .session-row.unread .s-title { text-style: bold; color: #3b82f6; }
 .session-row.is-hidden { color: #8e8e93; }
 .nav-disabled {
@@ -738,4 +738,32 @@ Select:focus { border: round #3b82f6; }
     color: #2f7cf6;
     text-style: bold;
     background: transparent;
+}
+
+/* 行菜单层只挂在主屏上。模态屏不走这条，避免改掉确认框的层。 */
+LightAgentScreen {
+    layers: default menu;
+}
+
+Input.s-rename,
+Input.s-rename:focus {
+    width: auto;
+    max-width: 1fr;
+    height: 1;
+    min-height: 1;
+    padding: 0;
+    margin: 0;
+    border: none;
+    background: #2f7cf6;
+    color: #ffffff;
+    background-tint: 0%;
+    text-style: bold;
+}
+Input.s-rename .input--selection {
+    background: #1d4ed8;
+    color: #ffffff;
+}
+Input.s-rename .input--cursor {
+    background: #ffffff;
+    color: #2f7cf6;
 }

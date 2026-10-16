@@ -8,10 +8,13 @@ import pytest
 
 pytest.importorskip("textual")
 
+from textual.screen import ModalScreen
+
 from local.conversations.models import BotIdentity
 from local.tui.app import LightAgentTUI, Session, SessionRow
 from local.tui.backend import MockBackend
-from local.tui.identity_ui import ConversationMenuScreen, IdentityEditorScreen
+from local.tui.identity_ui import IdentityEditorScreen
+from local.tui.row_menu import MenuAction, RowContextMenu
 
 
 def test_colon_opens_the_session_menu_and_identity_save_is_custom(tmp_path):
@@ -36,15 +39,17 @@ async def _pilot(tmp_path):
         row = next(item for item in app.query(SessionRow) if item.session.id == "main01")
         row.focus()
         await pilot.press("colon")
-        await pilot.pause(0.05)
-        menu = app.screen
-        assert isinstance(menu, ConversationMenuScreen)
-        options = list(menu.query_one("#menu-options").options)
-        labels = [str(getattr(option, "prompt", option)) for option in options]
+        await pilot.pause()
+        assert len(app.screen_stack) == 1
+        assert not isinstance(app.screen, ModalScreen)
+        menu = app.query_one(RowContextMenu)
+        assert menu.display
+        labels = [item.label_text for item in menu.query(MenuAction) if not item._pruning]
         assert any("设定身份" in label for label in labels)
         assert any("置顶" in label for label in labels)
         await pilot.press("escape")
-        await pilot.pause(0.05)
+        await pilot.pause()
+        assert not menu.display
 
         app.open_identity_editor(next(item for item in app.sessions if item.id == "main01"))
         await pilot.pause(0.05)
