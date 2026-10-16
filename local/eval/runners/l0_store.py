@@ -95,7 +95,12 @@ def main(argv: list[str] | None = None) -> int:
                 cases.append(case)
 
     results = [run_case(c) for c in cases]
-    report_name = "l0_store_jd" if (args.file == "jd_bar" or args.tier == "jd") else "l0_store"
+    if args.file in ("life_heuristics", "life_heuristics.yaml"):
+        report_name = "life_heuristics"
+    elif args.file == "jd_bar" or args.tier == "jd":
+        report_name = "l0_store_jd"
+    else:
+        report_name = "l0_store"
     jpath, mpath = write_report(
         report_name,
         results,

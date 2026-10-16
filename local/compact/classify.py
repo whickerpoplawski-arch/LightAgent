@@ -106,9 +106,18 @@ def classify_text(
     *,
     space_id: str | None = None,
 ) -> tuple[list[ExtractedMemory], list[ProceduralCandidate]]:
-    """Return profile hits and procedural candidates for one user message."""
+    """Return profile hits and procedural candidates for one user message.
+
+    A turn that says 别记 or 别改忌口 writes nothing, even if a later clause
+    would otherwise match 「记住」.
+    """
     raw = (text or "").strip()
     if not raw:
+        return [], []
+    from local.constraints.negation import refusal_flags
+
+    blocked = refusal_flags(raw)
+    if blocked["dont_remember"] or blocked["dont_change_diet"]:
         return [], []
     memories: list[ExtractedMemory] = []
     procedural: list[ProceduralCandidate] = []

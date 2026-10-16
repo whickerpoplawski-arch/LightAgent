@@ -1400,25 +1400,18 @@ class LightAgentTUI(App):
         return session.space_id or session.project_id or session.id
 
     def _announce_due(self) -> None:
-        """List due reminders when the app or a session opens. No model call."""
-        try:
-            from local.routines.due import due_routines, stale_routines
+        """List due reminders when the app or a session opens. No model call.
 
-            space = self._active_space_id()
-            due = due_routines(self._workspace_dir, space_id=space)
-            due_ids = {item.id for item in due}
-            stale = [
-                item
-                for item in stale_routines(self._workspace_dir, space_id=space)
-                if item.id not in due_ids
-            ]
+        Quiet hours and a repeated due set stay silent. Confirm still runs the routine.
+        """
+        try:
+            from local.routines.due import take_due_notices
+
+            payload = take_due_notices(self._workspace_dir, space_id=self._active_space_id())
         except Exception:
             return
-        if due:
-            titles = "、".join(item.title for item in due[:3])
-            self.notify(f"到点的提醒：{titles}。回复「确认提醒」才会执行。")
-        if stale:
-            self.notify(f"这些提醒很久没用了，可以说「暂停提醒 {stale[0].title}」。")
+        for notice in payload.get("notices") or []:
+            self.notify(notice)
 
     def _show_routine_note(self, user_text: str, notice: str) -> None:
         if self.current_room_id:
@@ -1548,18 +1541,21 @@ class LightAgentTUI(App):
         parsed = parse_routine(text)
         if parsed is None:
             return False
-        from local.routines.store import RoutineStore
+        from local.routines.due import create_explicit
 
         try:
-            routine = RoutineStore(self._workspace_dir).create(
-                title=parsed["title"],
-                instruction=parsed["instruction"],
-                cadence=parsed["cadence"],
+            created = create_explicit(
+                self._workspace_dir,
+                text,
                 owner_space=self._active_space_id(),
-                timezone_name=parsed["timezone"],
             )
         except Exception as exc:
             self._show_routine_note(text, f"没能记下提醒：{exc}")
+            return True
+        routine = created.get("routine")
+        if not created.get("created"):
+            title = routine.title if routine is not None else parsed["title"]
+            self._show_routine_note(text, f"已经有这条提醒：{title}。不会再记一条。")
             return True
         self._show_routine_note(
             text,

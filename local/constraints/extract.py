@@ -30,12 +30,20 @@ def _is_question(text: str) -> bool:
 
 
 def classify_utterance(text: str) -> str | None:
-    """``remember``, ``supersede``, ``forget``, or None. Questions are not constraints."""
+    """``remember``, ``supersede``, ``forget``, or None. Questions are not constraints.
+
+    「别记」/「别改忌口」赢过记住和改口。明确的忘掉忌口仍可忘记，除非同时说了别改。
+    """
     cleaned = (text or "").strip()
     if not cleaned or _is_question(cleaned):
         return None
-    if any(phrase in cleaned for phrase in _FORGET):
+    from .negation import refusal_flags
+
+    flags = refusal_flags(cleaned)
+    if any(phrase in cleaned for phrase in _FORGET) and not flags["dont_change_diet"]:
         return "forget"
+    if flags["dont_change_diet"] or flags["dont_remember"]:
+        return None
     if any(phrase in cleaned for phrase in _LIFT):
         return "supersede"
     if any(phrase in cleaned for phrase in _REMEMBER):

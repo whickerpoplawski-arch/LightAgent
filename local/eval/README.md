@@ -24,6 +24,7 @@ local/eval/
   cases/l3_core.yaml       # 24 条核心
   cases/jd_bar.yaml        # 34 条 JD A–E 尺子（v1）
   cases/jd_bar_v2.yaml     # 52 条：v1+社区扩面（多约束/飞轮边界/单层Swarm/多store）
+  cases/life_heuristics.yaml  # 生活向 27 题：卡 grounded / 别记别搜别改忌口 / 多约束
   runners/l0_store.py      # mode=store
   runners/l2_live_tools.py # mode=live_agent（亦可跑 store）
   reports/                 # md+json + *_latest.*
@@ -54,6 +55,9 @@ PYTHONPATH=. /workspace/la-venv/bin/python -m local.eval.runners.l2_live_tools -
 # 单条 / 按 bar
 PYTHONPATH=. /workspace/la-venv/bin/python -m local.eval.runners.l2_live_tools --file jd_bar --id JD-A03
 PYTHONPATH=. /workspace/la-venv/bin/python -m local.eval.runners.l0_store --file jd_bar --bar D
+
+# 生活启发式（store，0 token；失败即非 0。不是 JD，不上 FACTS/RAGAS；无 live 题）
+PYTHONPATH=. python -m local.eval.runners.l0_store --file life_heuristics
 ```
 
 报告：`local/eval/reports/l0_store_latest.md`、`l2_live_l3_latest.md`、`jd_bar_live_latest.md`。

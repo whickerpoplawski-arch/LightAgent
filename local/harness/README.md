@@ -26,6 +26,21 @@
 - 群 compact 与主持总结不调用模型。`LIGHTAGENT_ROOM_HOST_LLM` 被忽略。
 - SoftRoutine 只在用户写出「每周 / 每天 / 一次提醒」或 `/routine` 时创建。到点只提示。回复「确认提醒」才执行，并带上本轮预算和取消令牌。Mock 与 `LIGHTAGENT_FORBID_OPENROUTER=1` 不调用模型。没有定时器，错过的周期不补跑。
 
+## 4 日离线常驻
+
+同一 workspace 跑完剧本 40 段。零模型。**不是 JD 达标**，不接 WorkArena / THE AGENT COMPANY。
+
+```bash
+PYTHONPATH=. python -m local.harness.four_day
+```
+
+live 是单独开关，默认关。没有 `LIGHTAGENT_4DAY_LIVE=1` 时 `--live` 直接拒绝。打开后本入口仍不调用模型（上限 0 次联网）：
+
+```bash
+# 默认不要跑。不是发布门禁。
+LIGHTAGENT_4DAY_LIVE=1 python -m local.harness.four_day --live
+```
+
 ## 非目标
 
 OS sandbox、默认 ToT / LightDAG、Host 或群 compact 的默认 LLM、Dreaming、系统推送、把 1:1 和群 transcript 合成一份、把 pack 写进用户消息、短聊自动建 LifeGoal、每条消息都写 checkpoint、杀线程、改日限 45 或 `:free` 门闩。
