@@ -47,8 +47,19 @@ DAILY_LIMIT = 45
 from local.tui.blobs import accent_for, assign_blob, paint_blob, pick_unused_blob
 from local.tui.blobs import BLOB_CATALOG as _BLOB_CATALOG
 AVATARS = [(b['id'], b['accent']) for b in _BLOB_CATALOG]
+from local.tui.chrome import ShellChrome, SoftButton, SoftField, nav_pill, row_cap_px
 from local.tui.graphics import GraphicsImage, fit_graphics_widget, preserve_image_colors
-from local.tui.soft_render import load_avatar, render_agent_bubble, render_user_bubble
+from local.tui.shell_render import (
+    FIELD_RGBA,
+    HOVER_RGBA,
+    MAIN_RGBA,
+    PCT_RGBA,
+    SELECT_RGBA,
+    SIDEBAR_RGBA,
+    render_end_caps,
+    rgb_hex,
+)
+from local.tui.soft_render import display_avatar, render_agent_bubble, render_user_bubble
 
 # 兼容旧名
 assign_avatar = assign_blob
@@ -59,6 +70,14 @@ BUBBLE_WRAP_CELLS = 42
 
 def _rich_escape(text: str) -> str:
     return str(text).replace("\\", "\\\\").replace("[", "\\[")
+
+
+def model_caption(name: str) -> str:
+    """交稿画面不把 mock-echo 摆在顶栏。真模型名仍显示。"""
+    text = (name or "").strip()
+    if not text or "mock" in text.lower():
+        return ""
+    return f"模型 · {text}"
 
 
 def format_header(title: str, avatar_id: str, suffix: str = "") -> str:
@@ -188,17 +207,60 @@ class SessionRow(Horizontal):
         return self.session.avatar or "blue_drop"
 
     def compose(self) -> ComposeResult:
-        yield GraphicsImage(load_avatar(self.session.avatar or "blue_drop", 48), classes="s-avatar")
+        yield GraphicsImage(self._cap_image(SIDEBAR_RGBA, right=False), classes="row-cap row-cap-left")
+        yield GraphicsImage(self._avatar_image(SIDEBAR_RGBA), classes="s-avatar")
         with Vertical(classes="s-meta"):
             yield Label(self._title(), classes="s-title")
             yield Label(self._subtitle(), classes="s-preview")
+        yield GraphicsImage(self._cap_image(SIDEBAR_RGBA, right=True), classes="row-cap row-cap-right")
+
+    def _avatar_image(self, backdrop: tuple[int, int, int, int]):
+        return display_avatar(self.session.avatar or "blue_drop", backdrop)
+
+    def _cap_image(self, fill: tuple[int, int, int, int], *, right: bool):
+        height, cap = row_cap_px()
+        left, right_img = render_end_caps(height, cap, fill, radius=min(18, height // 3))
+        return right_img if right else left
 
     def on_mount(self) -> None:
-        fit_graphics_widget(self.query_one(".s-avatar"))
         app = self.app
         if isinstance(app, LightAgentTUI) and app.current is self.session:
             self.add_class("selected")
         self._sync_flags()
+        self._sync_plate(force=True)
+
+    def on_enter(self, _event=None) -> None:
+        self._hot = True
+        self._sync_plate(force=True)
+
+    def on_leave(self, _event=None) -> None:
+        self._hot = False
+        self._sync_plate(force=True)
+
+    def _plate_fill(self) -> tuple[int, int, int, int]:
+        if "selected" in self.classes:
+            return SELECT_RGBA
+        if getattr(self, "_hot", False):
+            return HOVER_RGBA
+        return SIDEBAR_RGBA
+
+    def _sync_plate(self, force: bool = False) -> None:
+        fill = self._plate_fill()
+        if not force and getattr(self, "_plate_fill_key", None) == fill:
+            return
+        self._plate_fill_key = fill
+        self.styles.background = rgb_hex(fill)
+        try:
+            left = self.query_one(".row-cap-left")
+            right = self.query_one(".row-cap-right")
+            avatar = self.query_one(".s-avatar")
+        except Exception:
+            return
+        left.image = self._cap_image(fill, right=False)
+        right.image = self._cap_image(fill, right=True)
+        avatar.image = self._avatar_image(fill)
+        for widget in (left, right, avatar):
+            fit_graphics_widget(widget)
 
     def _sync_flags(self) -> None:
         if self.session.unread:
@@ -211,15 +273,10 @@ class SessionRow(Horizontal):
             self.remove_class("is-hidden")
 
     def refresh_text(self) -> None:
-        try:
-            avatar = self.query_one(".s-avatar")
-            avatar.image = load_avatar(self.session.avatar or "blue_drop", 48)
-            fit_graphics_widget(avatar)
-        except Exception:
-            pass
         self.query_one(".s-title", Label).update(self._title())
         self.query_one(".s-preview", Label).update(self._subtitle())
         self._sync_flags()
+        self._sync_plate(force=True)
 
     def on_click(self) -> None:
         app = self.app
@@ -312,7 +369,7 @@ class ChatBubble(Horizontal):
             yield Static(f"✳  {wrap_terminal_text(self._text)}", classes="notice-line", markup=False)
         else:
             bid = self.avatar or "blue_drop"
-            yield GraphicsImage(load_avatar(bid, 64), classes="msg-avatar")
+            yield GraphicsImage(display_avatar(bid, MAIN_RGBA), classes="msg-avatar")
             yield GraphicsImage(render_agent_bubble(self._text), classes="soft-bubble agent-soft")
 
     def on_mount(self) -> None:
@@ -667,64 +724,75 @@ class LightAgentTUI(App):
 
     # ---------- 布局 ----------
     def compose(self) -> ComposeResult:
-        with Horizontal(id="shell"):
-            with Vertical(id="sidebar"):
-                with Horizontal(id="side-top"):
-                    yield Label("✨ LightAgent", id="brand")
-                    yield Static("+", id="new-btn")
-                yield Input(placeholder="🔍  搜索项目/会话", id="search")
-                with VerticalScroll(id="nav"):
-                    yield Label("置顶", id="pinned-section", classes="nav-section")
-                    yield Vertical(id="pinned-list")
-                    yield Label("项目", classes="nav-section")
-                    yield Static("+ 新项目", id="new-project-btn", classes="nav-action")
-                    yield Vertical(id="project-list")
-                    yield Label("群聊", id="room-section", classes="nav-section")
-                    yield Static("创建群聊", id="group-chat-btn", classes="nav-action")
-                    yield Vertical(id="room-list")
-                    yield Label("会话", classes="nav-section")
-                    yield Vertical(id="ungrouped-list")
-                    yield Static("显示已隐藏", id="show-hidden-btn", classes="nav-action")
-                with Horizontal(id="side-foot"):
-                    yield Static("P", id="profile-dot")
-                    yield Label("本地 · MX" if __import__("os").environ.get("LIGHTAGENT_PROVIDER", "mx") != "openrouter" else "本地 · 免费额度", id="profile-label")
-                    yield Static("⚙", id="settings-gear")
-            with Vertical(id="main"):
-                with Horizontal(id="header"):
-                    yield GraphicsImage(load_avatar("blue_drop", 48), id="h-avatar", classes="h-avatar")
-                    yield Label("", id="h-title")
-                    yield Label("", id="h-model")
-                with TabbedContent(id="tabs"):
-                    with TabPane("对话", id="tab-chat"):
-                        yield VerticalScroll(id="chat")
-                    with TabPane("记忆", id="tab-memory"):
-                        yield MemoryPanel()
-                    with TabPane("轨迹", id="tab-trace"):
-                        with Vertical(id="trace-pane"):
-                            with Horizontal(id="trace-meta"):
-                                yield Label("⏱ 时长", id="tm-dur")
-                                yield Label("🔁 轮次", id="tm-rounds")
-                                yield Label("⚙ 调用", id="tm-calls")
-                                yield Label("", id="tm-filter")
-                                yield Input(placeholder="🔍  tool:名 / user: / 关键词", id="trace-search")
-                            yield Vertical(id="timeline")
-                            yield VerticalScroll(id="trace-feed")
-                yield Static("", id="thinking")
-                with Horizontal(id="composer"):
-                    yield Static("+", id="attach-hint")
-                    yield Input(placeholder="+ 给 LightAgent 发消息…", id="prompt")
-                    yield Static(">", id="send-hint")
-                with Horizontal(id="context-dock"):
-                    yield Static("", id="ctx-spacer")
-                    with Vertical(id="context-popover"):
-                        with Horizontal(id="ctx-head"):
-                            yield Static("", id="ctx-title")
-                            yield Static("", id="ctx-used")
-                        yield Static("", id="ctx-bar")
-                        yield Static("", id="ctx-rows")
-                with Horizontal(id="stats-bar"):
-                    yield Static("", id="stats")
-                    yield Static("", id="ctx-pct")
+        with ShellChrome(id="shell-chrome"):
+            with Horizontal(id="shell"):
+                with Vertical(id="sidebar"):
+                    with Horizontal(id="side-top"):
+                        yield Label("✨ LightAgent", id="brand")
+                        yield SoftButton(id="new-btn")
+                    yield SoftField(
+                        Input(placeholder="🔍  搜索项目/会话", id="search"),
+                        id="search-wrap",
+                    )
+                    with VerticalScroll(id="nav"):
+                        yield Label("置顶", id="pinned-section", classes="nav-section")
+                        yield Vertical(id="pinned-list")
+                        yield Label("项目", classes="nav-section")
+                        yield nav_pill("+ 新项目", "new-project-btn")
+                        yield Vertical(id="project-list")
+                        yield Label("群聊", id="room-section", classes="nav-section")
+                        yield nav_pill("创建群聊", "group-chat-btn")
+                        yield Vertical(id="room-list")
+                        yield Label("会话", classes="nav-section")
+                        yield Vertical(id="ungrouped-list")
+                        yield nav_pill("显示已隐藏", "show-hidden-btn")
+                    with Horizontal(id="side-foot"):
+                        yield Static("P", id="profile-dot")
+                        yield Label("本地 · MX" if __import__("os").environ.get("LIGHTAGENT_PROVIDER", "mx") != "openrouter" else "本地 · 免费额度", id="profile-label")
+                        yield Static("⚙", id="settings-gear")
+                with Vertical(id="main"):
+                    with Horizontal(id="header"):
+                        yield GraphicsImage(display_avatar("blue_drop", MAIN_RGBA), id="h-avatar", classes="h-avatar")
+                        yield Label("", id="h-title")
+                        yield Label("", id="h-model")
+                    with TabbedContent(id="tabs"):
+                        with TabPane("对话", id="tab-chat"):
+                            yield VerticalScroll(id="chat")
+                        with TabPane("记忆", id="tab-memory"):
+                            yield MemoryPanel()
+                        with TabPane("轨迹", id="tab-trace"):
+                            with Vertical(id="trace-pane"):
+                                with Horizontal(id="trace-meta"):
+                                    yield Label("⏱ 时长", id="tm-dur")
+                                    yield Label("🔁 轮次", id="tm-rounds")
+                                    yield Label("⚙ 调用", id="tm-calls")
+                                    yield Label("", id="tm-filter")
+                                    yield Input(placeholder="🔍  tool:名 / user: / 关键词", id="trace-search")
+                                yield Vertical(id="timeline")
+                                yield VerticalScroll(id="trace-feed")
+                    yield Static("", id="thinking")
+                    yield SoftField(
+                        Input(placeholder="+ 给 LightAgent 发消息…", id="prompt"),
+                        fill=FIELD_RGBA,
+                        id="composer",
+                    )
+                    with Horizontal(id="context-dock"):
+                        yield Static("", id="ctx-spacer")
+                        with Vertical(id="context-popover"):
+                            with Horizontal(id="ctx-head"):
+                                yield Static("", id="ctx-title")
+                                yield Static("", id="ctx-used")
+                            yield Static("", id="ctx-bar")
+                            yield Static("", id="ctx-rows")
+                    with Horizontal(id="stats-bar"):
+                        yield Static("", id="stats")
+                        yield SoftField(
+                            Static("", id="ctx-pct"),
+                            fill=PCT_RGBA,
+                            focus_fill=None,
+                            id="pct-wrap",
+                            click_target_id="ctx-pct",
+                        )
 
     def on_mount(self) -> None:
         self.theme = "textual-light"
@@ -734,7 +802,17 @@ class LightAgentTUI(App):
         self.rebuild_nav()
         self.load_session(self.current)
         self.update_stats()
-        self.query_one("#prompt").focus()
+        if os.environ.get("LIGHTAGENT_TUI_SHOT") == "1":
+            # 截图时不要把焦点停在搜索或输入上，避免焦点底色抢画面。
+            rows = [row for row in self.query(SessionRow) if row.session is self.current]
+            if rows:
+                rows[0].focus()
+        else:
+            self.query_one("#prompt").focus()
+        try:
+            self.query_one(ShellChrome).paint()
+        except Exception:
+            pass
         if self._persist:
             self.persist_workspace()
         self._announce_due()
@@ -910,8 +988,11 @@ class LightAgentTUI(App):
                 row.add_class("selected")
             else:
                 row.remove_class("selected")
-        hidden_btn = self.query_one("#show-hidden-btn", Static)
-        hidden_btn.update("隐藏已隐藏项" if self._show_hidden else "显示已隐藏")
+        hidden_btn = self.query_one("#show-hidden-btn")
+        hidden_label = hidden_btn.query_one(".pill-label", Static)
+        hidden_label.update("隐藏已隐藏项" if self._show_hidden else "显示已隐藏")
+        for row in self.query(SessionRow):
+            row._sync_plate(force=True)
 
     def select_session(self, session: Session) -> None:
         self.current = session
@@ -1150,7 +1231,7 @@ class LightAgentTUI(App):
         chat.scroll_end(animate=False)
         role = (s.identity.role_title or "").strip()
         self.paint_header(s.title, s.avatar, role)
-        self.query_one("#h-model", Label).update(f"模型 · {self.backend.name}")
+        self.query_one("#h-model", Label).update(model_caption(self.backend.name))
         self.refresh_trace(s)
         self.update_stats()
 
@@ -1694,7 +1775,7 @@ class LightAgentTUI(App):
                 st.cache_hit_pct = round(
                     (st.cache_hit_pct * (st.rounds - 1) + reply.cache_hit_pct) / st.rounds, 1
                 )
-            self.query_one("#h-model", Label).update(f"模型 · {reply.model}")
+            self.query_one("#h-model", Label).update(model_caption(getattr(reply, "model", "") or self.backend.name))
         touch(s)
         self._maybe_auto_compact(s)
         self.refresh_trace(s)
@@ -1712,8 +1793,29 @@ class LightAgentTUI(App):
         self._trace_filter = event.value
         self.refresh_trace(self.current)
 
+    def _clicked_id(self, widget) -> str | None:
+        """点在预渲端盖上时，id 在父胶囊上，不在那张图上。"""
+        known = {
+            "new-btn",
+            "new-project-btn",
+            "settings-gear",
+            "ctx-pct",
+            "tm-calls",
+            "show-hidden-btn",
+            "group-chat-btn",
+        }
+        while widget is not None and widget is not self:
+            wid = getattr(widget, "id", None)
+            if wid in known:
+                return wid
+            alias = getattr(widget, "click_target_id", None)
+            if alias in known:
+                return alias
+            widget = getattr(widget, "parent", None)
+        return None
+
     def on_click(self, event) -> None:
-        wid = getattr(event.widget, "id", None)
+        wid = self._clicked_id(event.widget)
         if wid == "new-btn":
             self.new_session_in_project(None)
         elif wid == "new-project-btn":
@@ -2157,7 +2259,7 @@ class LightAgentTUI(App):
     def paint_header(self, title: str, avatar_id: str, suffix: str = "") -> None:
         avatar_id = avatar_id or "blue_drop"
         avatar = self.query_one("#h-avatar")
-        avatar.image = load_avatar(avatar_id, 48)
+        avatar.image = display_avatar(avatar_id, MAIN_RGBA)
         fit_graphics_widget(avatar)
         self.query_one("#h-title", Label).update(format_header(title, avatar_id, suffix))
 
@@ -2283,10 +2385,39 @@ def make_backend(mock: bool):
     return MockBackend() if mock else OpenRouterBackend()
 
 
+def seed_shot_workspace() -> tuple[list[Session], list[Project]]:
+    """截图用短对话。文案里不出现 mock，头像用侧栏同一套 blob。"""
+    sessions, projects = seed_demo_workspace()
+    project = projects[0]
+    blob = "indigo_hex"
+    session = Session(
+        "新建试用",
+        events=[
+            ("user", "你好，这是新建对话"),
+            ("agent", "你好！这是一条新会话，头像已与其它会话区分。"),
+        ],
+        avatar=blob,
+        accent=accent_for(blob),
+        project_id=project.id,
+    )
+    session.trace.stats.rounds = 1
+    session.trace.stats.steps = 2
+    project.session_ids.insert(0, session.id)
+    sessions.insert(0, session)
+    return sessions, projects
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="LightAgent TUI")
     p.add_argument("--mock", action="store_true", help="使用假后端，不调用任何 API")
+    p.add_argument("--shot", action="store_true", help="预置一条短对话供 kitty 截图，画面不写 mock 文案")
     args = p.parse_args()
+    if args.shot:
+        os.environ["LIGHTAGENT_TUI_SHOT"] = "1"
+        backend = make_backend(True)
+        backend._mock_used = 2
+        LightAgentTUI(backend, *seed_shot_workspace(), persist=False).run()
+        return
     if not args.mock:
         # 日常默认：MX deepseek-v4.1-flash + effort=low（可用环境变量覆盖）
         os.environ.setdefault("LIGHTAGENT_PROVIDER", "mx")

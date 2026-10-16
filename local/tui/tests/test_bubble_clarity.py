@@ -33,6 +33,9 @@ from local.tui.soft_render import (
 
 
 def _plain(widget) -> str:
+    content = getattr(widget, "content", None)
+    if isinstance(content, str) and content.strip():
+        return content
     rendered = widget.render()
     plain = getattr(rendered, "plain", None)
     if isinstance(plain, str):

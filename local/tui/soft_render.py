@@ -12,13 +12,13 @@ from PIL import Image, ImageDraw, ImageFont
 
 from local.tui.blobs import BLOB_DIR, blob_path
 
-# 字号 ≥18、半径 ≥20。色值贴参考：用户蓝 #2f7cf6，助手灰 #e9e9eb。
-BUBBLE_FONT_PX = 20
+# 字号 ≥18。短句半径取半高，做成肥胶囊。色值贴参考：用户蓝 #2f7cf6，助手灰 #e9e9eb。
+BUBBLE_FONT_PX = 24
 BUBBLE_RADIUS = 28
 AVATAR_PX = 64
-PAD_X, PAD_Y = 22, 16
-MAX_BUBBLE_W = 460
-LINE_H = 30
+PAD_X, PAD_Y = 28, 20
+MAX_BUBBLE_W = 520
+LINE_H = 34
 USER_RGBA = (47, 124, 246, 255)  # #2f7cf6
 AGENT_RGBA = (233, 233, 235, 255)  # #e9e9eb
 USER_TEXT = (255, 255, 255, 255)
@@ -54,6 +54,22 @@ def _font(bold: bool, size: int) -> ImageFont.FreeTypeFont:
         except Exception:
             pass
     return ImageFont.load_default()
+
+
+def avatar_px() -> int:
+    """侧栏和聊天气泡共用：正好 3 行单元格，视觉同级。"""
+    from local.tui.shell_render import cell_size
+
+    _cw, ch = cell_size()
+    return max(48, int(ch) * 3)
+
+
+def display_avatar(blob_id: str, backdrop: tuple[int, int, int, int]) -> Image.Image:
+    """把头像铺在洞内底色上。透明像素会露出单元格底色，和选中行对不齐。"""
+    sprite = load_avatar(blob_id, avatar_px())
+    base = Image.new("RGBA", sprite.size, backdrop)
+    base.alpha_composite(sprite)
+    return base
 
 
 def load_avatar(blob_id: str, size: int = AVATAR_PX) -> Image.Image:
@@ -96,51 +112,69 @@ def _wrap(text: str, font: ImageFont.ImageFont, max_w: int) -> list[str]:
     return lines or [""]
 
 
-def _rounded_rect(size: tuple[int, int], radius: int, fill: tuple[int, int, int, int]) -> Image.Image:
-    """超采样再缩小，圆角是光滑的，不是锯齿方块。"""
-    w, h = size
-    scale = 4
-    big = Image.new("RGBA", (w * scale, h * scale), (0, 0, 0, 0))
+def _snap_pair(width: int, height: int) -> tuple[int, int]:
+    """对齐到单元格，kitty 按 1:1 贴图，不再二次缩放出台阶。"""
+    from local.tui.shell_render import cell_size
+
+    cw, ch = cell_size()
+    cols = max(1, round(width / cw))
+    rows = max(1, round(height / ch))
+    return cols * cw, rows * ch
+
+
+def _bubble_radius(height: int, lines: int) -> int:
+    """短句（一行）半径取半高，两端是半圆。多行仍用接近一行高的大圆角。"""
+    if lines <= 1:
+        return max(1, height // 2)
+    one_line = LINE_H + 2 * PAD_Y
+    return max(BUBBLE_RADIUS, min(height // 2, one_line // 2))
+
+
+def _render_bubble(
+    text: str,
+    fill: tuple[int, int, int, int],
+    text_fill: tuple[int, int, int, int],
+    *,
+    bold: bool,
+) -> Image.Image:
+    """字和圆角一起超采样再缩小，短句是肥胶囊。"""
+    font1 = _font(bold, BUBBLE_FONT_PX)
+    inner_w = MAX_BUBBLE_W - 2 * PAD_X
+    lines = _wrap(text, font1, inner_w)
+    tw = int(max((font1.getlength(ln) for ln in lines), default=0))
+    th = LINE_H * len(lines)
+    width = min(MAX_BUBBLE_W, max(tw + 2 * PAD_X, 80))
+    height = th + 2 * PAD_Y
+    if len(lines) <= 1:
+        width = max(width, height + PAD_X)
+    width, height = _snap_pair(width, height)
+    radius = _bubble_radius(height, len(lines))
+    scale = 3
+    big = Image.new("RGBA", (width * scale, height * scale), (0, 0, 0, 0))
     draw = ImageDraw.Draw(big)
-    draw.rounded_rectangle((0, 0, w * scale - 1, h * scale - 1), radius=radius * scale, fill=fill)
-    return big.resize((w, h), Image.Resampling.LANCZOS)
-
-
-def _paint_lines(image: Image.Image, lines: list[str], font: ImageFont.ImageFont, fill: tuple[int, int, int, int]) -> None:
-    draw = ImageDraw.Draw(image)
-    y = PAD_Y
+    draw.rounded_rectangle(
+        (0, 0, width * scale - 1, height * scale - 1),
+        radius=radius * scale,
+        fill=fill,
+    )
+    font = _font(bold, BUBBLE_FONT_PX * scale)
+    text_h = LINE_H * len(lines)
+    y = max(0, (height - text_h) // 2) * scale
     for line in lines:
-        draw.text((PAD_X, y), line, font=font, fill=fill)
-        y += LINE_H
+        draw.text((PAD_X * scale, y), line, font=font, fill=text_fill)
+        y += LINE_H * scale
+    return big.resize((width, height), Image.Resampling.LANCZOS)
 
 
 def render_user_bubble(text: str) -> Image.Image:
     """右对齐蓝胶囊。交给 TGPImage / SixelImage，不要交给 Halfcell。"""
-    font = _font(True, BUBBLE_FONT_PX)
-    inner_w = MAX_BUBBLE_W - 2 * PAD_X
-    lines = _wrap(text, font, inner_w)
-    tw = int(max(font.getlength(ln) for ln in lines))
-    th = LINE_H * len(lines)
-    w = min(MAX_BUBBLE_W, max(tw + 2 * PAD_X, BUBBLE_RADIUS * 2))
-    h = th + 2 * PAD_Y
-    bg = _rounded_rect((w, h), BUBBLE_RADIUS, USER_RGBA)
-    _paint_lines(bg, lines, font, USER_TEXT)
-    return bg
+    return _render_bubble(text, USER_RGBA, USER_TEXT, bold=True)
 
 
 def render_agent_bubble(text: str) -> Image.Image:
-    """左对齐浅灰胶囊。"""
-    font = _font(False, BUBBLE_FONT_PX)
+    """左对齐浅灰胶囊。短句同样是半高半径。"""
     plain = re.sub(r"[*_`#>+]", "", text)
-    inner_w = MAX_BUBBLE_W - 2 * PAD_X
-    lines = _wrap(plain, font, inner_w)
-    tw = int(max((font.getlength(ln) for ln in lines), default=0))
-    th = LINE_H * len(lines)
-    w = min(MAX_BUBBLE_W, max(tw + 2 * PAD_X, 80))
-    h = th + 2 * PAD_Y
-    bg = _rounded_rect((w, h), BUBBLE_RADIUS, AGENT_RGBA)
-    _paint_lines(bg, lines, font, AGENT_TEXT)
-    return bg
+    return _render_bubble(plain, AGENT_RGBA, AGENT_TEXT, bold=False)
 
 
 def compose_agent_row(blob_id: str, text: str, *, gap: int = 12) -> Image.Image:
