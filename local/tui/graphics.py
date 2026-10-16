@@ -86,11 +86,60 @@ def fit_graphics_widget(widget) -> None:
     widget.styles.max_height = rows
 
 
+def tgp_held(app) -> bool:
+    """行菜单打开时不要换图。局部刷新会删掉 Kitty 图像 id，占位符却留在屏上。"""
+    return bool(getattr(app, "_tgp_hold", False))
+
+
+def rewrite_character_plane(app) -> None:
+    """整屏重写字符格，让 Kitty 丢掉已经对不上的 Unicode 占位。
+
+    只标脏不够：壳图铺满窗口，id 被删掉之后，没被这次更新盖住的格子会显示成蓝灰块。
+    """
+    if app is None or not getattr(app, "is_running", False):
+        return
+    try:
+        screen = app.screen
+    except Exception:
+        return
+    if screen is None:
+        return
+    screen.refresh(repaint=True)
+    compositor = getattr(screen, "_compositor", None)
+    size = getattr(screen, "size", None)
+    if compositor is not None and size:
+        compositor._dirty_regions.add(size.region)
+
+
+def _install_stable_render(widget) -> None:
+    """同一张图、同一格数不要在每次 render() 里删掉终端图像。
+
+    textual-image 的 render() 会先 cleanup（发 a=d）再上传新 id。
+    合成器若丢掉这些占位符，旧格子仍指向已删除的 id，Kitty 就画出蓝灰矩形。
+    """
+    if getattr(widget, "_tgp_reuse_installed", False):
+        return
+    original = widget.render
+
+    def render():
+        size = widget._get_styled_size()
+        cached = widget._renderable
+        if cached is not None and getattr(widget, "_tgp_reuse_size", None) == size:
+            return cached
+        rendered = original()
+        widget._tgp_reuse_size = size
+        return rendered
+
+    widget.render = render
+    widget._tgp_reuse_installed = True
+
+
 def GraphicsImage(image: PILImage.Image, *, classes: str | None = None, id: str | None = None):
     """挂一张 PIL 图。优先 TGP，否则 Sixel。"""
     widget = graphics_widget_class()(image, classes=classes, id=id)
     if isinstance(widget, _FORBIDDEN):
         raise RuntimeError("气泡/头像不能走 halfcell 或 unicode")
+    _install_stable_render(widget)
     fit_graphics_widget(widget)
     return widget
 
@@ -109,5 +158,7 @@ __all__ = [
     "fit_graphics_widget",
     "graphics_widget_class",
     "is_graphics_widget",
+    "rewrite_character_plane",
     "terminal_prefers_tgp",
+    "tgp_held",
 ]

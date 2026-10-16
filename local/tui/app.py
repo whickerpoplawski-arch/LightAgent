@@ -59,7 +59,13 @@ from local.tui.blobs import accent_for, assign_blob, paint_blob, pick_unused_blo
 from local.tui.blobs import BLOB_CATALOG as _BLOB_CATALOG
 AVATARS = [(b['id'], b['accent']) for b in _BLOB_CATALOG]
 from local.tui.chrome import ShellChrome, SoftButton, SoftField, nav_pill, row_cap_px
-from local.tui.graphics import GraphicsImage, fit_graphics_widget, preserve_image_colors
+from local.tui.graphics import (
+    GraphicsImage,
+    fit_graphics_widget,
+    preserve_image_colors,
+    rewrite_character_plane,
+    tgp_held,
+)
 from local.tui.shell_render import (
     FIELD_RGBA,
     HOVER_RGBA,
@@ -258,6 +264,10 @@ class SessionRow(Horizontal):
         return SIDEBAR_RGBA
 
     def _sync_plate(self, force: bool = False) -> None:
+        if tgp_held(self.app):
+            self._tgp_pending = True
+            return
+        self._tgp_pending = False
         fill = self._plate_fill()
         if not force and getattr(self, "_plate_fill_key", None) == fill:
             return
@@ -274,6 +284,7 @@ class SessionRow(Horizontal):
         avatar.image = self._avatar_image(fill)
         for widget in (left, right, avatar):
             fit_graphics_widget(widget)
+        rewrite_character_plane(self.app)
 
     def _sync_flags(self) -> None:
         if self.session.unread:
@@ -753,6 +764,8 @@ class LightAgentTUI(App):
         self._menu_anchor = None
         self._menu_swallow_click = False
         self._suppress_menu_click = False
+        # 行菜单打开期间冻结会换图的 TGP。关掉或落稳后再整屏重写字符层。
+        self._tgp_hold = False
         if self._persist:
             self._load_rooms()
 
@@ -2209,6 +2222,7 @@ class LightAgentTUI(App):
         menu = self._row_menu()
         if menu is None:
             return
+        self._tgp_hold = True
         self._menu_callback = callback
         self._menu_anchor = anchor
         self._suppress_menu_click = bool(from_mouse)
@@ -2256,6 +2270,7 @@ class LightAgentTUI(App):
             return
         menu.absolute_offset = desired
         menu.refresh(layout=True)
+        rewrite_character_plane(self)
 
     def _settle_menu(self, *, retry: bool = True) -> None:
         menu = self._row_menu()
@@ -2276,6 +2291,7 @@ class LightAgentTUI(App):
         self._clamp_menu(menu)
         if actions and not any(item.has_focus for item in actions):
             actions[0].focus(False)
+        rewrite_character_plane(self)
 
     def _clamp_menu(self, menu: RowContextMenu) -> None:
         anchor = self._menu_anchor
@@ -2289,6 +2305,33 @@ class LightAgentTUI(App):
         menu = self._row_menu()
         if menu is not None:
             menu.hide()
+        self._tgp_hold = False
+        self._apply_pending_tgp()
+        self.call_after_refresh(self.rewrite_character_plane)
+
+    def rewrite_character_plane(self) -> None:
+        rewrite_character_plane(self)
+
+    def _apply_pending_tgp(self) -> None:
+        """菜单关掉之后补做被冻住的壳图、胶囊和行端盖。"""
+        if self._tgp_hold:
+            return
+        pending_chrome = [widget for widget in self.query(ShellChrome) if getattr(widget, "_tgp_pending", False)]
+        pending_fields = [widget for widget in self.query(SoftField) if getattr(widget, "_tgp_pending", False)]
+        pending_buttons = [widget for widget in self.query(SoftButton) if getattr(widget, "_tgp_pending", False)]
+        pending_rows = [widget for widget in self.query(SessionRow) if getattr(widget, "_tgp_pending", False)]
+        for widget in pending_chrome:
+            widget._tgp_pending = False
+            widget.paint()
+        for widget in pending_fields:
+            widget._tgp_pending = False
+            widget._repaint()
+        for widget in pending_buttons:
+            widget._tgp_pending = False
+            widget._repaint()
+        for widget in pending_rows:
+            widget._tgp_pending = False
+            widget._sync_plate(force=True)
 
     def dismiss_row_menu(self) -> None:
         anchor = self._menu_anchor

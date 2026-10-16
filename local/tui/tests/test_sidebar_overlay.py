@@ -296,3 +296,37 @@ async def _preview(tmp_path):
         await pilot.pause()
         assert room.title == "x"
         assert room.id == "room1"
+
+
+def test_open_menu_holds_tgp_uploads(tmp_path):
+    asyncio.run(_holds_tgp(tmp_path))
+
+
+async def _holds_tgp(tmp_path):
+    """Blur and shell paint must not swap images while the row menu is up."""
+    app = _app(tmp_path)
+    async with app.run_test(size=(100, 36)) as pilot:
+        await pilot.pause()
+        field = app.query_one("#search-wrap")
+        top = field.query_one(".soft-top")
+        first = top.render()
+        assert top.render() is first
+        image = top.image
+        await _open(pilot, app)
+        assert app._tgp_hold
+        field._paint_key = None
+        field._repaint()
+        assert field._tgp_pending
+        assert top.image is image
+        assert top.render() is first
+        chrome = app.query_one(ShellChrome)
+        chrome._key = None
+        chrome.paint()
+        assert chrome._tgp_pending
+        assert chrome._key is None
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.pause()
+        assert not app._tgp_hold
+        assert not field._tgp_pending
+        assert not chrome._tgp_pending

@@ -17,7 +17,13 @@ from textual.containers import Horizontal, Vertical
 from textual.widget import Widget
 from textual.widgets import Static
 
-from local.tui.graphics import GraphicsImage, fit_graphics_widget, graphics_widget_class
+from local.tui.graphics import (
+    GraphicsImage,
+    fit_graphics_widget,
+    graphics_widget_class,
+    rewrite_character_plane,
+    tgp_held,
+)
 from local.tui.shell_render import (
     ACTION_RGBA,
     FOCUS_RGBA,
@@ -58,9 +64,28 @@ class ShellChrome(Vertical):
         if self._timer is not None:
             self._timer.stop()
         self._timer = self.set_timer(0.1, self.paint)
+        size = (self.size.width, self.size.height)
+        if size == getattr(self, "_plane_size", None):
+            return
+        self._plane_size = size
+        # 终端尺寸一变，Kitty 会把整窗壳的旧占位留在文字上。先整屏重写，别等删 id。
+        rewrite_character_plane(self.app)
+
+    def _drop_renderable(self, renderable) -> None:
+        """删掉已经被新帧替换的壳图。格子还指着它的时候删，Kitty 会画出蓝灰块。"""
+        if renderable is None or renderable is self._renderable:
+            return
+        cleanup = getattr(renderable, "cleanup", None)
+        if cleanup:
+            cleanup()
 
     def paint(self) -> None:
         self._timer = None
+        # 菜单打开时整窗壳若重传，旧占位符会留在侧栏文字和浮层上。
+        if tgp_held(self.app):
+            self._tgp_pending = True
+            return
+        self._tgp_pending = False
         cols, rows = self.size.width, self.size.height
         if cols < 24 or rows < 12:
             return
@@ -70,10 +95,7 @@ class ShellChrome(Vertical):
             return
         metrics = compute_metrics(cols, rows, cw, ch)
         self._image = render_chrome(metrics)
-        if self._renderable is not None:
-            cleanup = getattr(self._renderable, "cleanup", None)
-            if cleanup:
-                cleanup()
+        previous = self._renderable
         self._renderable = None
         self._key = key
         # padding 会被 Textual 画成平涂底色，圆角弧进不了那一圈。
@@ -87,6 +109,14 @@ class ShellChrome(Vertical):
             pass
         setattr(self.app, "_shell_metrics", metrics)
         self.refresh(layout=True)
+        rewrite_character_plane(self.app)
+        if previous is not None:
+            # 新帧写完再删旧 id。先删的话，没被盖住的占位符会变成蓝灰块。
+            self.call_after_refresh(lambda renderable=previous: self._retire_renderable(renderable))
+
+    def _retire_renderable(self, renderable) -> None:
+        rewrite_character_plane(self.app)
+        self.call_after_refresh(lambda: self._drop_renderable(renderable))
 
     def render(self):
         if self._image is None:
@@ -153,6 +183,10 @@ class SoftField(Vertical):
         self._repaint()
 
     def _repaint(self) -> None:
+        if tgp_held(self.app):
+            self._tgp_pending = True
+            return
+        self._tgp_pending = False
         width = self.size.width
         height = self.size.height
         if width < 8 or height < 3:
@@ -187,6 +221,7 @@ class SoftField(Vertical):
         self._center.styles.min_height = 1
         self._center.styles.padding = (0, 1)
         self._paint_key = key
+        rewrite_character_plane(self.app)
 
 
 class SoftButton(Widget):
@@ -202,6 +237,10 @@ class SoftButton(Widget):
         self._repaint()
 
     def _repaint(self) -> None:
+        if tgp_held(self.app):
+            self._tgp_pending = True
+            return
+        self._tgp_pending = False
         width, height = self.size.width, self.size.height
         if width < 2 or height < 2:
             return
@@ -210,6 +249,7 @@ class SoftButton(Widget):
         widget = self.query_one(".soft-button-img")
         widget.image = image
         fit_graphics_widget(widget)
+        rewrite_character_plane(self.app)
 
 
 def nav_pill(label: str, pill_id: str) -> SoftField:
